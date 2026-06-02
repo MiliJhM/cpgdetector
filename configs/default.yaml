@@ -1,0 +1,52 @@
+seed: 2026
+device: cuda
+
+data:
+  genome_dir: data/dna
+  cpg_table: data/cpgIslandExt.tsv
+  train_chroms: ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16"]
+  val_chroms: ["chr17", "chr18"]
+  test_chroms: ["chr19", "chr20", "chr21", "chr22"]
+  window_size: 512
+  stride: 128
+  max_train_windows: 200000
+  max_val_windows: 10000
+  max_test_windows: 20000
+  positive_fraction: 0.45
+  hard_negative_fraction: 0.25
+  min_gc_for_hard_negative: .50
+  boundary_fl: 2000
+
+model:
+  channels: [64, 128, 256]
+  kernels: [7, 5, 3]
+  dilations: [1, 2, 4]
+  dropout: 0.10
+
+training:
+  epochs: 50
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.01
+  lambda_window: 0.25
+  lambda_dice: 0.20
+  base_pos_weight: null
+  estimate_pos_weight_batches: 2048
+  amp: true
+  pin_memory: true
+  early_stopping_patience: 5
+  num_workers: 0
+  threshold_grid: [0.20, 0.25, 0.30, .35, .40, 0.45, 0.60, 0.70, 0.80]
+
+prediction:
+  batch_size: 2048
+  write_bedgraph: false
+
+postprocess:
+  min_length: 2000
+  max_gap: 100
+  use_window_filter: false
+  window_threshold: 0.10
+
+output:
+  run_dir: runs/default

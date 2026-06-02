@@ -1,0 +1,27 @@
+# Ignore genome files in the data/ directory
+data/**/*.fa
+data/**/*.fasta
+data/**/*.fna
+data/**/*.ffn
+data/**/*.fastq
+data/**/*.fq
+
+# GenBank and related formats
+data/**/*.gb
+data/**/*.gbk
+data/**/*.gbff
+
+# Compressed variants
+data/**/*.fa.gz
+data/**/*.fasta.gz
+data/**/*.fastq.gz
+data/**/*.fq.gz
+data/**/*.gbk.gz
+data/**/*.gbff.gz
+
+# Generated project artifacts
+runs/
+__pycache__/
+*.pyc
+*.egg-info/
+docs/

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cpgdetector"
+version = "0.1.0"
+description = "CpG island multitask base-level segmentation with PyTorch"
+requires-python = ">=3.10"
+dependencies = [
+    "torch==2.12.0+cu130",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+    "PyYAML>=6.0",
+    "tqdm>=4.66",
+    "pytest>=8.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["CpGDetector/src"]
+
+[tool.setuptools]
+package-dir = {"" = "CpGDetector/src"}
