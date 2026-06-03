@@ -63,7 +63,7 @@ def test_mask_and_dataset(tmp_path: Path):
         mode="val",
     )
     item = dataset[0]
-    assert item["x"].shape == (4, 20)
+    assert item["seq_idx"].shape == (20,)
     assert item["mask"].shape == (20,)
     assert item["fraction"].shape == (1,)
 

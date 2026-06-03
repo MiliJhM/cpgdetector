@@ -27,6 +27,7 @@ model:
 training:
   epochs: 1
   batch_size: 64
+  compile: false
   lr: 0.001
   weight_decay: 0.01
   lambda_window: 0.25
@@ -37,6 +38,9 @@ training:
   pin_memory: true
   early_stopping_patience: 5
   num_workers: 0
+  persistent_workers: false
+  prefetch_factor: 2
+  metric_bins: 512
   threshold_grid: [0.20, 0.30, 0.40, 0.50, .60, 0.70, 0.80]
 
 prediction:

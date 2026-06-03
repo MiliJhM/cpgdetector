@@ -9,7 +9,7 @@ data:
   test_chroms: ["chr19", "chr20", "chr21", "chr22"]
   window_size: 512
   stride: 128
-  max_train_windows: 200000
+  max_train_windows: 800000
   max_val_windows: 10000
   max_test_windows: 20000
   positive_fraction: 0.45
@@ -26,7 +26,7 @@ model:
 
 training:
   epochs: 50
-  batch_size: 1024
+  batch_size: 2048
   compile: True
   lr: 0.001
   weight_decay: 0.01
@@ -37,7 +37,10 @@ training:
   amp: true
   pin_memory: true
   early_stopping_patience: 10
-  num_workers: 0
+  num_workers: 8
+  persistent_workers: true
+  prefetch_factor: 4
+  metric_bins: 2048
   threshold_grid: [0.20, 0.25, 0.30, .35, .40, 0.45, 0.60, 0.70, 0.80]
 
 prediction:

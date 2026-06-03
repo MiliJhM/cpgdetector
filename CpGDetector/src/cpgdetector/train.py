@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -19,7 +20,7 @@ from .baseline import (
 )
 from .data import CpGAnnotations, CpGWindowDataset, GenomeStore
 from .losses import multitask_loss
-from .metrics import best_threshold, classification_metrics, regression_metrics
+from .metrics import BinaryMetricAccumulator, best_threshold, classification_metrics, regression_metrics
 from .model import MultiTaskCpGNet
 from .utils import load_yaml, resolve_device, save_json, save_yaml, set_seed
 from .visualize import plot_baseline_comparison, plot_roc_pr_curves, plot_training_curves
@@ -63,13 +64,36 @@ def build_dataset(config: dict, split: str, genome: GenomeStore, annotations: Cp
 def dataloader(dataset: CpGWindowDataset, config: dict, shuffle: bool) -> DataLoader:
     train_cfg = config["training"]
     pin_memory = bool(train_cfg.get("pin_memory", False)) and torch.cuda.is_available()
+    num_workers = int(train_cfg.get("num_workers", 0))
+    kwargs = {}
+    if num_workers > 0:
+        kwargs["persistent_workers"] = bool(train_cfg.get("persistent_workers", True))
+        kwargs["prefetch_factor"] = int(train_cfg.get("prefetch_factor", 4))
     return DataLoader(
         dataset,
         batch_size=int(train_cfg["batch_size"]),
         shuffle=shuffle,
-        num_workers=int(train_cfg.get("num_workers", 0)),
+        num_workers=num_workers,
         pin_memory=pin_memory,
+        collate_fn=cpg_collate,
+        **kwargs,
     )
+
+
+def cpg_collate(batch: list[dict]) -> dict[str, torch.Tensor | list[str] | list[int]]:
+    seq_idx = torch.stack([item["seq_idx"] for item in batch], dim=0).long()
+    x = F.one_hot(seq_idx, num_classes=4).permute(0, 2, 1).contiguous().float()
+    mask = torch.stack([item["mask"] for item in batch], dim=0).float()
+    fraction = torch.stack([item["fraction"] for item in batch], dim=0).float()
+    has_cpg = torch.stack([item["has_cpg"] for item in batch], dim=0).float()
+    return {
+        "x": x,
+        "mask": mask,
+        "fraction": fraction,
+        "has_cpg": has_cpg,
+        "chrom": [item["chrom"] for item in batch],
+        "start": [int(item["start"]) for item in batch],
+    }
 
 
 def estimate_pos_weight(dataset: CpGWindowDataset, max_items: int) -> float:
@@ -83,6 +107,20 @@ def estimate_pos_weight(dataset: CpGWindowDataset, max_items: int) -> float:
     negatives = max(total - positives, 1.0)
     positives = max(positives, 1.0)
     return float(min(negatives / positives, 50.0))
+
+
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    return model._orig_mod if hasattr(model, "_orig_mod") else model
+
+
+def maybe_compile_model(model: torch.nn.Module, enabled: bool) -> torch.nn.Module:
+    if not enabled:
+        return model
+    try:
+        return torch.compile(model)
+    except Exception as exc:
+        print(f"Warning: torch.compile failed; continuing without compilation: {exc}", file=sys.stderr)
+        return model
 
 
 def train_one_epoch(
@@ -129,18 +167,20 @@ def evaluate(
     loader: DataLoader,
     device: torch.device,
     config: dict,
-    base_threshold: float,
+    base_threshold: float | None,
     base_pos_weight: float | None,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], float, dict[str, float]]:
     model.eval()
     amp_enabled = bool(config["training"].get("amp", True)) and device.type == "cuda"
     losses = {"loss": 0.0, "base_bce": 0.0, "dice": 0.0, "window_bce": 0.0}
     count = 0
-    base_targets: list[np.ndarray] = []
-    base_scores: list[np.ndarray] = []
-    window_targets: list[np.ndarray] = []
-    window_scores: list[np.ndarray] = []
-    fractions: list[np.ndarray] = []
+    thresholds = [float(x) for x in config["training"]["threshold_grid"]]
+    bins = int(config["training"].get("metric_bins", 2048))
+    base_acc = BinaryMetricAccumulator(thresholds, bins=bins, device=device)
+    window_acc = BinaryMetricAccumulator([0.5], bins=bins, device=device)
+    frac_sse = torch.zeros((), dtype=torch.float64, device=device)
+    frac_sae = torch.zeros((), dtype=torch.float64, device=device)
+    frac_count = torch.zeros((), dtype=torch.float64, device=device)
     for batch in tqdm(loader, desc="eval", leave=False, ascii=True):
         x = batch["x"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
@@ -159,23 +199,29 @@ def evaluate(
         count += batch_size
         for key in losses:
             losses[key] += parts[key] * batch_size
-        base_targets.append(mask.detach().cpu().numpy().reshape(-1))
-        base_scores.append(torch.sigmoid(outputs["base_logits"]).detach().cpu().numpy().reshape(-1))
-        frac_np = fraction.detach().cpu().numpy().reshape(-1)
-        fractions.append(frac_np)
-        window_targets.append((frac_np > 0).astype(np.float32))
-        window_scores.append(torch.sigmoid(outputs["window_logits"]).detach().cpu().numpy().reshape(-1))
+        base_scores = torch.sigmoid(outputs["base_logits"])
+        window_scores = torch.sigmoid(outputs["window_logits"])
+        base_acc.update(mask, base_scores)
+        window_acc.update((fraction > 0).float(), window_scores)
+        frac_sse += torch.sum((fraction.double() - window_scores.double()) ** 2)
+        frac_sae += torch.sum(torch.abs(fraction.double() - window_scores.double()))
+        frac_count += fraction.numel()
 
-    y_base = np.concatenate(base_targets)
-    s_base = np.concatenate(base_scores)
-    y_window = np.concatenate(window_targets)
-    s_window = np.concatenate(window_scores)
-    y_fraction = np.concatenate(fractions)
+    if base_threshold is None:
+        selected_threshold, base_best_metrics = base_acc.best_f1()
+    else:
+        selected_threshold = float(base_threshold)
+        base_best_metrics = base_acc.metrics_at(selected_threshold)
     result = {f"val_{key}": value / max(count, 1) for key, value in losses.items()}
-    result.update({f"val_base_{k}": v for k, v in classification_metrics(y_base, s_base, base_threshold).items()})
-    result.update({f"val_window_{k}": v for k, v in classification_metrics(y_window, s_window, 0.5).items()})
-    result.update({f"val_fraction_{k}": v for k, v in regression_metrics(y_fraction, s_window).items()})
-    return result
+    result.update({f"val_base_{k}": v for k, v in base_best_metrics.items()})
+    result.update({f"val_window_{k}": v for k, v in window_acc.metrics_at(0.5).items()})
+    result.update(
+        {
+            "val_fraction_mse": float((frac_sse / torch.clamp(frac_count, min=1.0)).detach().cpu()),
+            "val_fraction_mae": float((frac_sae / torch.clamp(frac_count, min=1.0)).detach().cpu()),
+        }
+    )
+    return result, selected_threshold, base_best_metrics
 
 
 @torch.no_grad()
@@ -236,12 +282,10 @@ def main(argv: list[str] | None = None) -> int:
     save_yaml(config, run_dir / "config.yaml")
     set_seed(int(config["seed"]))
 
-    # Try triton availability early, since it can cause obscure errors if the CUDA version is incompatible. It's not strictly required, so we can still run without it if it's not available.
-    triton_available = False
-    if config['training'].get('compile', True):
+    # Try Triton availability early; torch.compile is useful on A100/Linux but optional.
+    if config["training"].get("compile", True):
         try:
             import triton  # noqa: F401
-            triton_available = True
         except ImportError:
             print("Warning: Triton is not available. If you have a compatible NVIDIA GPU, consider installing Triton for potential performance improvements.", file=sys.stderr)
 
@@ -273,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     scaler = torch.amp.GradScaler(device.type, enabled=bool(config["training"].get("amp", True)) and device.type == "cuda")
 
 
-    model = torch.compile(model) if bool(config["training"].get("compile", True)) else model
+    model = maybe_compile_model(model, bool(config["training"].get("compile", True)))
 
     metrics_rows: list[dict[str, float]] = []
     best_metric = -math.inf
@@ -283,9 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     for epoch in range(1, int(config["training"]["epochs"]) + 1):
         print(f"Epoch {epoch}")
         train_metrics = train_one_epoch(model, train_loader, optimizer, scaler, device, config, base_pos_weight)
-        y_base, s_base = collect_base_scores(model, val_loader, device, config)
-        best_threshold_value, base_metrics = best_threshold(y_base, s_base, [float(x) for x in config["training"]["threshold_grid"]])
-        val_metrics = evaluate(model, val_loader, device, config, best_threshold_value, base_pos_weight)
+        val_metrics, best_threshold_value, base_metrics = evaluate(model, val_loader, device, config, None, base_pos_weight)
         row = {"epoch": epoch, "threshold": best_threshold_value, **train_metrics, **val_metrics}
         row.update({f"val_base_best_{k}": v for k, v in base_metrics.items()})
         metrics_rows.append(row)
@@ -301,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
             best_epoch = epoch
             torch.save(
                 {
-                    "model_state": model.state_dict(),
+                    "model_state": unwrap_model(model).state_dict(),
                     "config": config,
                     "threshold": best_threshold_value,
                     "base_pos_weight": base_pos_weight,
@@ -332,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     save_json(summary, run_dir / "summary.json")
     plot_baseline_comparison(run_dir / "metrics.csv", run_dir / "summary.json", run_dir / "baseline_comparison.png")
     checkpoint = torch.load(run_dir / "best_model.pt", map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint["model_state"])
+    unwrap_model(model).load_state_dict(checkpoint["model_state"])
     curve_series = collect_model_curve_scores(model, val_loader, device, config)
     curve_series["Traditional rule"] = traditional_baseline_scores(val_ds, max_items=min(5000, len(val_ds)))
     curve_series["Logistic baseline"] = logistic_baseline_scores(

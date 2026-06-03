@@ -52,7 +52,7 @@ Main outputs:
 python -m cpgdetector.train --config configs/default.yaml
 ```
 
-The default configuration uses CUDA, AMP, `pin_memory`, batch size 512, prediction batch size 2048, and chromosome-level train/validation/test splits. `num_workers` defaults to 0 on Windows to avoid duplicating cached chromosome sequences across spawned worker processes.
+The default configuration is tuned for server-side GPU training: CUDA, AMP, `pin_memory`, batch size 2048, prediction batch size 2048, `num_workers: 8`, persistent workers, and prefetching. On Windows or memory-constrained machines, reduce `training.num_workers` to 0.
 
 ## One-Command Full Run
 

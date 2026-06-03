@@ -5,9 +5,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
-from .data import CpGAnnotations, GenomeStore, one_hot_encode, valid_acgt
+from .data import CpGAnnotations, GenomeStore, valid_encoded_window
 from .model import MultiTaskCpGNet
 from .postprocess import probabilities_to_intervals, write_bed, write_bedgraph
 from .utils import load_yaml, normalize_chrom, resolve_device
@@ -25,9 +26,9 @@ def predict_chromosome(
     amp: bool,
 ) -> np.ndarray:
     chrom = normalize_chrom(chrom)
-    seq = genome.load(chrom)
-    sums = np.zeros(len(seq), dtype=np.float32)
-    counts = np.zeros(len(seq), dtype=np.float32)
+    seq_idx = genome.load_encoded(chrom)
+    sums = np.zeros(len(seq_idx), dtype=np.float32)
+    counts = np.zeros(len(seq_idx), dtype=np.float32)
     batch: list[np.ndarray] = []
     starts: list[int] = []
     model.eval()
@@ -35,7 +36,8 @@ def predict_chromosome(
     def flush() -> None:
         if not batch:
             return
-        x = torch.from_numpy(np.stack(batch, axis=0)).to(device)
+        idx = torch.from_numpy(np.stack(batch, axis=0)).long().to(device)
+        x = F.one_hot(idx, num_classes=4).permute(0, 2, 1).contiguous().float()
         with torch.amp.autocast(device_type=device.type, enabled=amp and device.type == "cuda"):
             outputs = model(x)
             probs = torch.sigmoid(outputs["base_logits"]).detach().cpu().numpy()
@@ -46,11 +48,11 @@ def predict_chromosome(
         batch.clear()
         starts.clear()
 
-    for start in tqdm(range(0, max(0, len(seq) - window_size + 1), stride), desc=f"predict {chrom}", ascii=True):
-        sub = seq[start : start + window_size]
-        if not valid_acgt(sub):
+    for start in tqdm(range(0, max(0, len(seq_idx) - window_size + 1), stride), desc=f"predict {chrom}", ascii=True):
+        sub = seq_idx[start : start + window_size]
+        if not valid_encoded_window(sub):
             continue
-        batch.append(one_hot_encode(sub))
+        batch.append(sub.astype(np.int64, copy=True))
         starts.append(start)
         if len(batch) >= batch_size:
             flush()

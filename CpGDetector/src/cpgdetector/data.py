@@ -52,11 +52,22 @@ def one_hot_encode(seq: str) -> np.ndarray:
     return arr
 
 
+def encode_sequence(seq: str) -> np.ndarray:
+    encoded = np.frombuffer(seq.encode("ascii"), dtype=np.uint8)
+    return _ASCII_TO_INDEX[encoded].astype(np.int8, copy=False)
+
+
 def gc_fraction(seq: str) -> float:
     if not seq:
         return 0.0
     gc = seq.count("G") + seq.count("C")
     return gc / len(seq)
+
+
+def gc_fraction_encoded(seq_idx: np.ndarray) -> float:
+    if len(seq_idx) == 0:
+        return 0.0
+    return float(np.count_nonzero((seq_idx == 1) | (seq_idx == 2)) / len(seq_idx))
 
 
 @dataclass(frozen=True)
@@ -71,6 +82,7 @@ class GenomeStore:
     def __init__(self, genome_dir: str | Path):
         self.genome_dir = Path(genome_dir)
         self._cache: dict[str, str] = {}
+        self._encoded_cache: dict[str, np.ndarray] = {}
 
     def find_fasta(self, chrom: str) -> Path:
         chrom = normalize_chrom(chrom)
@@ -94,17 +106,27 @@ class GenomeStore:
             self._cache[chrom] = read_fasta(self.find_fasta(chrom))
         return self._cache[chrom]
 
+    def load_encoded(self, chrom: str) -> np.ndarray:
+        chrom = normalize_chrom(chrom)
+        if chrom not in self._encoded_cache:
+            self._encoded_cache[chrom] = encode_sequence(self.load(chrom))
+        return self._encoded_cache[chrom]
+
     def length(self, chrom: str) -> int:
         return len(self.load(chrom))
 
     def subseq(self, chrom: str, start: int, end: int) -> str:
         return self.load(chrom)[start:end]
 
+    def encoded_window(self, chrom: str, start: int, end: int) -> np.ndarray:
+        return self.load_encoded(chrom)[start:end]
+
 
 class CpGAnnotations:
     def __init__(self, table_path: str | Path):
         self.table_path = Path(table_path)
         self.by_chrom: dict[str, np.ndarray] = {}
+        self._mask_cache: dict[tuple[str, int], np.ndarray] = {}
         self._load()
 
     def _load(self) -> None:
@@ -153,6 +175,22 @@ class CpGAnnotations:
                 mask[left - start : right - start] = 1.0
         return mask
 
+    def full_mask(self, chrom: str, chrom_length: int) -> np.ndarray:
+        chrom = normalize_chrom(chrom)
+        key = (chrom, int(chrom_length))
+        if key not in self._mask_cache:
+            mask = np.zeros(int(chrom_length), dtype=np.uint8)
+            for iv_start, iv_end in self.intervals(chrom):
+                left = max(0, int(iv_start))
+                right = min(int(chrom_length), int(iv_end))
+                if left < right:
+                    mask[left:right] = 1
+            self._mask_cache[key] = mask
+        return self._mask_cache[key]
+
+    def mask_fast(self, chrom: str, start: int, end: int, chrom_length: int) -> np.ndarray:
+        return self.full_mask(chrom, chrom_length)[start:end]
+
     def overlap_fraction(self, chrom: str, start: int, end: int) -> float:
         return float(self.mask(chrom, start, end).mean())
 
@@ -160,6 +198,10 @@ class CpGAnnotations:
 def valid_acgt(seq: str) -> bool:
     encoded = np.frombuffer(seq.encode("ascii"), dtype=np.uint8)
     return bool(np.all(_ASCII_TO_INDEX[encoded] >= 0))
+
+
+def valid_encoded_window(seq_idx: np.ndarray) -> bool:
+    return bool(np.all(seq_idx >= 0))
 
 
 class CpGWindowDataset(Dataset):
@@ -213,7 +255,11 @@ class CpGWindowDataset(Dataset):
         return specs
 
     def _chrom_lengths(self) -> dict[str, int]:
-        return {chrom: self.genome.length(chrom) for chrom in self.chroms}
+        lengths = {chrom: self.genome.length(chrom) for chrom in self.chroms}
+        for chrom, length in lengths.items():
+            self.genome.load_encoded(chrom)
+            self.annotations.full_mask(chrom, length)
+        return lengths
 
     def _sample_positive(self, rng: random.Random, n: int) -> list[WindowSpec]:
         islands: list[tuple[str, int, int]] = []
@@ -234,8 +280,10 @@ class CpGWindowDataset(Dataset):
             if high < low:
                 continue
             start = rng.randint(low, high)
-            seq = self.genome.subseq(chrom, start, start + self.window_size)
-            if valid_acgt(seq) and self.annotations.overlap_fraction(chrom, start, start + self.window_size) > 0:
+            end = start + self.window_size
+            seq_idx = self.genome.encoded_window(chrom, start, end)
+            mask = self.annotations.mask_fast(chrom, start, end, chrom_len)
+            if valid_encoded_window(seq_idx) and mask.mean() > 0:
                 specs.append(WindowSpec(chrom, start))
         return specs
 
@@ -257,12 +305,12 @@ class CpGWindowDataset(Dataset):
             start = boundary + rng.randint(-self.boundary_flank, self.boundary_flank) - self.window_size // 2
             start = max(0, min(start, chrom_len - self.window_size))
             end = start + self.window_size
-            seq = self.genome.subseq(chrom, start, end)
-            if not valid_acgt(seq):
+            seq_idx = self.genome.encoded_window(chrom, start, end)
+            if not valid_encoded_window(seq_idx):
                 continue
-            if self.annotations.overlap_fraction(chrom, start, end) != 0:
+            if self.annotations.mask_fast(chrom, start, end, chrom_len).mean() != 0:
                 continue
-            if gc_fraction(seq) >= self.min_gc_for_hard_negative:
+            if gc_fraction_encoded(seq_idx) >= self.min_gc_for_hard_negative:
                 specs.append(WindowSpec(chrom, start))
         if len(specs) < n:
             specs.extend(self._sample_random_negative(rng, n - len(specs)))
@@ -280,8 +328,9 @@ class CpGWindowDataset(Dataset):
                 continue
             start = rng.randint(0, chrom_len - self.window_size)
             end = start + self.window_size
-            seq = self.genome.subseq(chrom, start, end)
-            if valid_acgt(seq) and self.annotations.overlap_fraction(chrom, start, end) == 0:
+            seq_idx = self.genome.encoded_window(chrom, start, end)
+            mask = self.annotations.mask_fast(chrom, start, end, chrom_len)
+            if valid_encoded_window(seq_idx) and mask.mean() == 0:
                 specs.append(WindowSpec(chrom, start))
         return specs
 
@@ -291,9 +340,11 @@ class CpGWindowDataset(Dataset):
         seen = 0
         for chrom in self.chroms:
             chrom_len = self.genome.length(chrom)
+            self.genome.load_encoded(chrom)
+            self.annotations.full_mask(chrom, chrom_len)
             for start in range(0, max(0, chrom_len - self.window_size + 1), self.stride):
-                seq = self.genome.subseq(chrom, start, start + self.window_size)
-                if not valid_acgt(seq):
+                seq_idx = self.genome.encoded_window(chrom, start, start + self.window_size)
+                if not valid_encoded_window(seq_idx):
                     continue
                 seen += 1
                 spec = WindowSpec(chrom, start)
@@ -314,14 +365,15 @@ class CpGWindowDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str | int]:
         spec = self.specs[idx]
         end = spec.start + self.window_size
-        seq = self.genome.subseq(spec.chrom, spec.start, end)
-        x = one_hot_encode(seq)
-        mask = self.annotations.mask(spec.chrom, spec.start, end)
+        chrom_len = self.genome.length(spec.chrom)
+        seq_idx = self.genome.encoded_window(spec.chrom, spec.start, end).astype(np.int64, copy=True)
+        mask = self.annotations.mask_fast(spec.chrom, spec.start, end, chrom_len).astype(np.float32, copy=True)
+        fraction = float(mask.mean())
         return {
-            "x": torch.from_numpy(x),
+            "seq_idx": torch.from_numpy(seq_idx),
             "mask": torch.from_numpy(mask),
-            "fraction": torch.tensor([float(mask.mean())], dtype=torch.float32),
-            "has_cpg": torch.tensor([float(mask.mean() > 0)], dtype=torch.float32),
+            "fraction": torch.tensor([fraction], dtype=torch.float32),
+            "has_cpg": torch.tensor([float(fraction > 0)], dtype=torch.float32),
             "chrom": spec.chrom,
             "start": spec.start,
         }
