@@ -12,7 +12,9 @@ from cpgdetector.dnabert2_baseline import (
     _require_transformers,
     _training_args_kwargs,
     dnabert2_training_plan,
+    positive_scores_from_predictions,
     model_from_pretrained_kwargs,
+    preprocess_logits_for_metrics,
     resolve_model_source,
     should_load_from_config,
 )
@@ -129,12 +131,20 @@ def test_dnabert2_flash_attention_is_disabled_in_config_by_default():
 
 def test_dnabert2_training_args_use_epoch_strategy(tmp_path: Path):
     hf = _require_transformers()
-    cfg = {"epochs": 7, "batch_size": 4, "eval_batch_size": 8, "fp16": False}
+    cfg = {"epochs": 7, "batch_size": 4, "eval_batch_size": 8, "eval_accumulation_steps": 3, "fp16": False}
     kwargs = _training_args_kwargs(tmp_path / "dnabert2", cfg, 1, hf["TrainingArguments"])
     assert kwargs["num_train_epochs"] == 7.0
     assert kwargs["max_steps"] == -1
     assert kwargs["save_strategy"] == "epoch"
+    assert kwargs["eval_accumulation_steps"] == 3
     assert "eval_steps" not in kwargs
+
+
+def test_dnabert2_preprocessed_scores_are_not_sigmoided_twice():
+    scores = preprocess_logits_for_metrics(torch.tensor([[0.0, 2.0], [3.0, 0.0]]), None).numpy()
+    recovered = positive_scores_from_predictions(scores)
+    assert np.allclose(recovered, scores)
+    assert recovered[0] > recovered[1]
 
 
 def test_dnabert2_training_plan_counts_epochs():

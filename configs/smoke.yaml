@@ -74,6 +74,8 @@ dnabert2_baseline:
   max_steps: -1
   batch_size: 2
   eval_batch_size: 4
+  eval_accumulation_steps: 2
+  torch_empty_cache_steps: null
   gradient_accumulation_steps: 1
   lr: 0.00003
   lr_scheduler_type: linear

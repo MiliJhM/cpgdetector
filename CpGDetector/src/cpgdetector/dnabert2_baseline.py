@@ -52,6 +52,14 @@ def torch_dtype_from_config(value: str | None):
     return mapping[name]
 
 
+def optional_int_from_config(value: Any, default: int | None = None) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, str) and value.lower() in {"", "none", "null"}:
+        return default
+    return int(value)
+
+
 def resolve_model_source(baseline_cfg: dict[str, Any], model_path_override: str | Path | None = None) -> str:
     model_path = model_path_override or baseline_cfg.get("model_path")
     if model_path:
@@ -260,18 +268,9 @@ class DnaSequenceCollator:
 
 def compute_metrics(eval_pred) -> dict[str, float]:
     predictions_raw, labels = eval_pred
-    logits = predictions_raw[0] if isinstance(predictions_raw, (tuple, list)) else predictions_raw
-    logits = np.asarray(logits)
-    labels = np.asarray(labels)
-    if logits.ndim == 1 or logits.shape[-1] == 1:
-        flat_logits = logits.reshape(-1)
-        scores = 1.0 / (1.0 + np.exp(-flat_logits))
-        predictions = (scores >= 0.5).astype(np.int64)
-    else:
-        shifted = logits - logits.max(axis=-1, keepdims=True)
-        probs = np.exp(shifted) / np.exp(shifted).sum(axis=-1, keepdims=True)
-        scores = probs[:, 1]
-        predictions = np.argmax(logits, axis=-1)
+    scores = positive_scores_from_predictions(predictions_raw).astype(np.float64).reshape(-1)
+    labels = np.asarray(labels).reshape(-1)
+    predictions = (scores >= 0.5).astype(np.int64)
 
     precision, recall, f1, _ = precision_recall_fscore_support(
         labels, predictions, average="binary", zero_division=0
@@ -294,22 +293,66 @@ def compute_metrics(eval_pred) -> dict[str, float]:
     return result
 
 
-def logits_to_positive_scores(predictions_raw) -> np.ndarray:
+def positive_scores_from_predictions(predictions_raw) -> np.ndarray:
     logits = predictions_raw[0] if isinstance(predictions_raw, (tuple, list)) else predictions_raw
     logits = np.asarray(logits)
     if logits.ndim == 1 or logits.shape[-1] == 1:
-        flat_logits = logits.reshape(-1)
-        return 1.0 / (1.0 + np.exp(-flat_logits))
+        values = logits.reshape(-1).astype(np.float64)
+        if values.size and np.nanmin(values) >= 0.0 and np.nanmax(values) <= 1.0:
+            return values
+        return 1.0 / (1.0 + np.exp(-values))
     shifted = logits - logits.max(axis=-1, keepdims=True)
     exp_logits = np.exp(shifted)
     probs = exp_logits / exp_logits.sum(axis=-1, keepdims=True)
     return probs[:, 1]
 
 
+def positive_scores_from_logits_tensor(logits) -> torch.Tensor:
+    logits = logits[0] if isinstance(logits, (tuple, list)) else logits
+    if logits.ndim == 1 or logits.shape[-1] == 1:
+        return torch.sigmoid(logits.reshape(-1))
+    return torch.softmax(logits, dim=-1)[:, 1]
+
+
+def preprocess_logits_for_metrics(logits, labels) -> torch.Tensor:
+    del labels
+    # HuggingFace Trainer otherwise keeps full model outputs for the whole
+    # evaluation loop. A single positive-class score is enough for all metrics.
+    return positive_scores_from_logits_tensor(logits).detach().float()
+
+
+def _prepare_batch_for_trainer(trainer, batch: dict[str, Any]) -> dict[str, Any]:
+    if hasattr(trainer, "_prepare_inputs"):
+        return trainer._prepare_inputs(batch)
+    device = trainer.args.device
+    return {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items()}
+
+
 def save_prediction_scores(trainer, dataset: Dataset, output_path: str | Path) -> tuple[np.ndarray, np.ndarray]:
-    prediction = trainer.predict(dataset)
-    labels = np.asarray(prediction.label_ids).astype(np.int32).reshape(-1)
-    scores = logits_to_positive_scores(prediction.predictions).astype(np.float64).reshape(-1)
+    dataloader = trainer.get_test_dataloader(dataset)
+    model = trainer.model
+    was_training = model.training
+    labels_parts: list[np.ndarray] = []
+    scores_parts: list[np.ndarray] = []
+    model.eval()
+    try:
+        with torch.inference_mode():
+            for batch in dataloader:
+                batch = _prepare_batch_for_trainer(trainer, batch)
+                labels = batch.pop("labels", None)
+                outputs = model(**batch)
+                logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+                scores = positive_scores_from_logits_tensor(logits)
+                scores_parts.append(scores.detach().float().cpu().numpy().reshape(-1))
+                if labels is None:
+                    raise ValueError("DNABERT2 score export requires labels in the evaluation dataset")
+                labels_parts.append(labels.detach().cpu().numpy().astype(np.int32).reshape(-1))
+                del outputs, logits, scores, labels, batch
+    finally:
+        if was_training:
+            model.train()
+    labels = np.concatenate(labels_parts).astype(np.int32, copy=False)
+    scores = np.concatenate(scores_parts).astype(np.float64, copy=False)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output_path, labels=labels, scores=scores)
@@ -338,6 +381,7 @@ def _training_args_kwargs(output_dir: Path, cfg: dict[str, Any], seed: int, trai
     if eval_strategy == "steps" and save_strategy == "steps" and save_steps % max(eval_steps, 1) != 0:
         raise ValueError("DNABERT2 save_steps must be a multiple of eval_steps when using step-based best-model loading")
 
+    eval_accumulation_steps = optional_int_from_config(cfg.get("eval_accumulation_steps"), 16)
     kwargs = {
         "output_dir": str(output_dir),
         "overwrite_output_dir": True,
@@ -367,6 +411,8 @@ def _training_args_kwargs(output_dir: Path, cfg: dict[str, Any], seed: int, trai
         "do_train": True,
         "do_eval": True,
     }
+    if eval_accumulation_steps is not None:
+        kwargs["eval_accumulation_steps"] = eval_accumulation_steps
     if cfg.get("warmup_ratio") is not None:
         kwargs["warmup_ratio"] = float(cfg["warmup_ratio"])
     else:
@@ -381,6 +427,9 @@ def _training_args_kwargs(output_dir: Path, cfg: dict[str, Any], seed: int, trai
         kwargs["eval_on_start"] = bool(cfg.get("eval_on_start", False))
     if "dataloader_pin_memory" in params:
         kwargs["dataloader_pin_memory"] = bool(cfg.get("pin_memory", torch.cuda.is_available()))
+    torch_empty_cache_steps = optional_int_from_config(cfg.get("torch_empty_cache_steps"), None)
+    if torch_empty_cache_steps is not None:
+        kwargs["torch_empty_cache_steps"] = torch_empty_cache_steps
     return {key: value for key, value in kwargs.items() if key in params}
 
 
@@ -399,6 +448,8 @@ def dnabert2_training_plan(train_size: int, val_size: int, test_size: int, cfg: 
         "max_steps": max_steps,
         "batch_size": batch_size,
         "eval_batch_size": int(cfg.get("eval_batch_size", 16)),
+        "eval_accumulation_steps": optional_int_from_config(cfg.get("eval_accumulation_steps"), 16),
+        "torch_empty_cache_steps": optional_int_from_config(cfg.get("torch_empty_cache_steps"), None),
         "gradient_accumulation_steps": grad_accum,
         "steps_per_epoch": steps_per_epoch,
         "effective_train_steps": effective_steps,
@@ -504,6 +555,8 @@ def run(
         ],
     }
     trainer_params = inspect.signature(hf["Trainer"].__init__).parameters
+    if "preprocess_logits_for_metrics" in trainer_params:
+        trainer_kwargs["preprocess_logits_for_metrics"] = preprocess_logits_for_metrics
     if "processing_class" in trainer_params:
         trainer_kwargs["processing_class"] = tokenizer
     else:
