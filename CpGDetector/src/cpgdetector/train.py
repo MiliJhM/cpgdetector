@@ -227,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-dir", default=None)
     args = parser.parse_args(argv)
 
+
     config = load_yaml(args.config)
     if args.run_dir:
         config["output"]["run_dir"] = args.run_dir
@@ -234,6 +235,16 @@ def main(argv: list[str] | None = None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     save_yaml(config, run_dir / "config.yaml")
     set_seed(int(config["seed"]))
+
+    # Try triton availability early, since it can cause obscure errors if the CUDA version is incompatible. It's not strictly required, so we can still run without it if it's not available.
+    triton_available = False
+    if config['training'].get('compile', True):
+        try:
+            import triton  # noqa: F401
+            triton_available = True
+        except ImportError:
+            print("Warning: Triton is not available. If you have a compatible NVIDIA GPU, consider installing Triton for potential performance improvements.", file=sys.stderr)
+
 
     device = resolve_device(config.get("device", "auto"))
     if config.get("device") == "cuda" and device.type != "cuda":
@@ -260,6 +271,9 @@ def main(argv: list[str] | None = None) -> int:
     model = MultiTaskCpGNet(**config["model"]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["training"]["lr"]), weight_decay=float(config["training"]["weight_decay"]))
     scaler = torch.amp.GradScaler(device.type, enabled=bool(config["training"].get("amp", True)) and device.type == "cuda")
+
+
+    model = torch.compile(model) if bool(config["training"].get("compile", True)) else model
 
     metrics_rows: list[dict[str, float]] = []
     best_metric = -math.inf

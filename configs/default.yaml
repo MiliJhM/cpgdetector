@@ -18,23 +18,25 @@ data:
   boundary_fl: 2000
 
 model:
-  channels: [64, 128, 256]
-  kernels: [7, 5, 3]
-  dilations: [1, 2, 4]
+  channels: [64, 128, 256, 512]
+  kernels: [5, 5, 3, 3]
+  dilations: [1, 1, 2, 4]
   dropout: 0.10
+  window_hidden_channels: 256
 
 training:
   epochs: 50
-  batch_size: 512
+  batch_size: 1024
+  compile: True
   lr: 0.001
   weight_decay: 0.01
-  lambda_window: 0.25
+  lambda_window: 0.40
   lambda_dice: 0.20
   base_pos_weight: null
   estimate_pos_weight_batches: 2048
   amp: true
   pin_memory: true
-  early_stopping_patience: 5
+  early_stopping_patience: 10
   num_workers: 0
   threshold_grid: [0.20, 0.25, 0.30, .35, .40, 0.45, 0.60, 0.70, 0.80]
 

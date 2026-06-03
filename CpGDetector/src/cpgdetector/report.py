@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
 
 ## Objective
 
-This project trains a multitask 1D CNN to reproduce UCSC hg38 CpG island annotations on GRCh38.p14 primary chromosomes. The main head predicts a base-level CpG island probability mask, and an auxiliary global pooling head predicts window-level CpG island presence strength.
+This project trains a multitask 1D CNN to reproduce UCSC hg38 CpG island annotations on GRCh38.p14 primary chromosomes. The main head predicts a base-level CpG island probability mask, and an auxiliary attention-pooling head predicts window-level CpG island presence strength.
 
 ## Data
 
@@ -45,7 +45,7 @@ The UCSC table uses 0-based half-open coordinates. Labels are generated as base-
 
 - Shared 1D convolution encoder with residual length-preserving convolution blocks.
 - Base segmentation head: `Conv1d(..., 1, kernel_size=1)` producing one logit per base.
-- Window auxiliary head: global average pooling followed by a fully connected output.
+- Window auxiliary head: task-specific 1x1 linear projection, learned attention pooling over sequence positions, and an MLP output.
 - Loss: base BCE + Dice loss + weighted window BCE.
 - CUDA AMP is enabled when a CUDA device is available.
 

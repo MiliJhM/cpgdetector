@@ -22,6 +22,7 @@ model:
   kernels: [7, 5, 3]
   dilations: [1, 2, 4]
   dropout: 0.05
+  window_hidden_channels: 64
 
 training:
   epochs: 1

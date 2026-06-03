@@ -69,7 +69,13 @@ def test_mask_and_dataset(tmp_path: Path):
 
 
 def test_model_outputs():
-    model = MultiTaskCpGNet(channels=[8, 16], kernels=[7, 3], dilations=[1, 2], dropout=0.0)
+    model = MultiTaskCpGNet(
+        channels=[8, 16],
+        kernels=[7, 3],
+        dilations=[1, 2],
+        dropout=0.0,
+        window_hidden_channels=12,
+    )
     x = torch.randn(2, 4, 64)
     out = model(x)
     assert out["base_logits"].shape == (2, 64)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import gzip
 import random
 from dataclasses import dataclass
@@ -324,3 +325,58 @@ class CpGWindowDataset(Dataset):
             "chrom": spec.chrom,
             "start": spec.start,
         }
+
+
+if __name__ == '__main__':
+    
+    parser = argparse.ArgumentParser(description="Test CpGDetector data loading")
+    parser.add_argument("--genome-dir", type=str, required=True, help="Directory containing chromosome FASTA files")
+    parser.add_argument("--cpg-table", type=str, required=True, help="Tab-delimited file with CpG island annotations (UCSC-style)")
+    parser.add_argument("--chrom", type=str, default="chr22", help="Chromosome to test (UCSC-style)")
+    args = parser.parse_args()
+    
+    print('[INFO] Testing data loading...')
+
+    genome = GenomeStore(args.genome_dir)
+    annotations = CpGAnnotations(args.cpg_table)
+    chrom = normalize_chrom(args.chrom)
+    seq = genome.load(chrom)
+    print(f'[INFO] Loaded chromosome {chrom} with length {len(seq)}')
+    intervals = annotations.intervals(chrom)
+    print(f'[INFO] Found {len(intervals)} CpG island intervals on {chrom}')
+    if len(intervals) > 0:
+        print(f'[INFO] First 5 intervals: {intervals[:5]}')
+    else:
+        print('[INFO] No CpG island intervals found on this chromosome.')
+
+    print("Visualizing first 10 borders of CpG islands (each 100 bases):")
+    for i, (start, end) in enumerate(intervals[:10]):
+        left_flank = genome.subseq(chrom, max(0, start - 100), start)
+        island = genome.subseq(chrom, start, end)
+        right_flank = genome.subseq(chrom, end, min(len(seq), end + 100))
+        print(f'Border {i+1}:')
+        print(f'  Left flank:  {left_flank[-50:]}')
+        print(f'  Island:     {island[:50]}...{island[-50:]} (length {len(island)})')
+        print(f'  Right flank: {right_flank[:50]}')
+
+    print('[INFO] Trying to instantiate CpGWindowDataset...')
+    dataset = CpGWindowDataset(
+        genome=genome,
+        annotations=annotations,
+        chroms=[chrom],
+        window_size=1000,
+        stride=500,
+        max_windows=10,
+        seed=42,
+        mode='train',
+        positive_fraction=0.5,
+        hard_negative_fraction=0.3,
+        min_gc_for_hard_negative=0.5,
+        boundary_flank=2000,
+    )
+    print(f'[INFO] Created dataset with {len(dataset)} windows.')
+    for i in range(len(dataset)):
+        item = dataset[i]
+        print(f'Window {i+1}: chrom={item["chrom"]}, start={item["start"]}, fraction={item["fraction"].item():.3f}, has_cpg={bool(item["has_cpg"].item())}')
+
+    print('[INFO] Data loading test completed successfully.')

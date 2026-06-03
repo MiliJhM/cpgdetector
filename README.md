@@ -2,6 +2,8 @@
 
 CpGDetector implements a PyTorch pipeline for CpG island detection on GRCh38.p14 primary chromosomes. It trains a multitask 1D CNN with a base-level segmentation head and a window-level auxiliary head.
 
+The model shares a dilated 1D convolution encoder, then uses task-specific adapters before each output head. The base head predicts one CpG island logit per base. The window head uses a 1x1 linear projection plus learned attention pooling over positions, instead of plain average pooling, so it can learn which bases in the window drive the window-level CpG island signal.
+
 ## Environment
 
 The project is configured for the local RTX 3080 Laptop GPU and installs the CUDA 13.0 PyTorch wheel.
@@ -13,6 +15,14 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 ```
 
 Dependencies are recorded in `requirements.txt`.
+
+## Installation
+
+```powershell
+cd CpGDetector/src
+pip install -e .
+```
+
 
 ## Data
 
@@ -26,7 +36,7 @@ The CpG table is UCSC-style with `chrom`, `chromStart`, and `chromEnd` columns. 
 ## Smoke Training
 
 ```powershell
-conda run -n cpgdetector python -m cpgdetector.train --config configs/smoke.yaml
+python -m cpgdetector.train --config configs/smoke.yaml
 ```
 
 Main outputs:
@@ -39,7 +49,7 @@ Main outputs:
 ## Full Training
 
 ```powershell
-conda run -n cpgdetector python -m cpgdetector.train --config configs/default.yaml
+python -m cpgdetector.train --config configs/default.yaml
 ```
 
 The default configuration uses CUDA, AMP, `pin_memory`, batch size 512, prediction batch size 2048, and chromosome-level train/validation/test splits. `num_workers` defaults to 0 on Windows to avoid duplicating cached chromosome sequences across spawned worker processes.
@@ -71,7 +81,7 @@ RUN_DIR=runs/default_ablation PRED_CHROMS="chr22" DO_PROFILE=1 bash scripts/run_
 ## Prediction
 
 ```powershell
-conda run -n cpgdetector python -m cpgdetector.predict --checkpoint runs/default/best_model.pt --chrom chr22
+python -m cpgdetector.predict --checkpoint runs/default/best_model.pt --chrom chr22
 ```
 
 Default prediction output:
@@ -81,13 +91,13 @@ Default prediction output:
 The base-level signal track can be very large. Write it only when needed:
 
 ```powershell
-conda run -n cpgdetector python -m cpgdetector.predict --checkpoint runs/default/best_model.pt --chrom chr22 --out-bedgraph runs/default/predicted_cpg_signal.bedGraph
+python -m cpgdetector.predict --checkpoint runs/default/best_model.pt --chrom chr22 --out-bedgraph runs/default/predicted_cpg_signal.bedGraph
 ```
 
 ## Interval Evaluation
 
 ```powershell
-conda run -n cpgdetector python -m cpgdetector.evaluate --checkpoint runs/default/best_model.pt --chrom chr22
+python -m cpgdetector.evaluate --checkpoint runs/default/best_model.pt --chrom chr22
 ```
 
 This computes interval precision, recall, F1, best-IoU, and boundary error against UCSC annotations.
@@ -95,7 +105,7 @@ This computes interval precision, recall, F1, best-IoU, and boundary error again
 ## Performance Profiling
 
 ```powershell
-conda run -n cpgdetector python -m cpgdetector.profile --config configs/smoke.yaml --batches 30
+python -m cpgdetector.profile --config configs/smoke.yaml --batches 30
 ```
 
 The profiler reports dataset build time, DataLoader time, compute time, throughput, and peak GPU memory.
@@ -103,7 +113,7 @@ The profiler reports dataset build time, DataLoader time, compute time, throughp
 ## Report
 
 ```powershell
-conda run -n cpgdetector python -m cpgdetector.report --run-dir runs/default
+python -m cpgdetector.report --run-dir runs/default
 ```
 
 This generates `report.md` from training metrics and summary artifacts.
