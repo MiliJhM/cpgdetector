@@ -25,7 +25,7 @@ model:
   window_hidden_channels: 256
 
 training:
-  epochs: 100
+  epochs: 50
   batch_size: 4096
   compile: True
   lr: 0.0005
@@ -35,13 +35,17 @@ training:
   plateau_factor: 0.5
   plateau_patience: 3
   weight_decay: 0.01
-  mtl_method: gradnorm
+  mtl_method: uncertainty
   lambda_window: 0.40
   lambda_dice: 0.20
   lambda_consistency: 0.10
   gradnorm_alpha: 1.5
   gradnorm_lambda: 1.0
   base_pos_weight: null
+  window_target_mode: mixed
+  window_presence_threshold: 0.05
+  lambda_window_fraction: 1.0
+  window_fraction_loss: smooth_l1
   estimate_pos_weight_batches: 2048
   amp: true
   pin_memory: true
@@ -92,7 +96,7 @@ dnabert2_baseline:
   eval_on_start: false
   early_stopping_patience: 3
   metric_for_best_model: f1
-  fp16: true
+  fp16: false
   pin_memory: true
   num_workers: 4
   report_to: none

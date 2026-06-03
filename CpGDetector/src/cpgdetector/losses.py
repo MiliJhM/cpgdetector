@@ -21,6 +21,28 @@ def normalized_gradnorm_weights(
     weights = torch.softmax(stacked, dim=0) * 2.0
     return {"base": weights[0], "window": weights[1]}
 
+def window_presence_target(fraction: torch.Tensor, threshold: float = 0.0) -> torch.Tensor:
+    return (fraction >= float(threshold)).to(dtype=fraction.dtype)
+
+
+def window_fraction_logits(outputs: dict[str, torch.Tensor]) -> torch.Tensor:
+    return outputs.get("window_fraction_logits", outputs["window_logits"])
+
+
+def window_fraction_loss_from_logits(
+    logits: torch.Tensor,
+    fraction: torch.Tensor,
+    loss_name: str = "smooth_l1",
+) -> torch.Tensor:
+    name = str(loss_name).lower()
+    pred = torch.sigmoid(logits)
+    if name in {"smooth_l1", "huber"}:
+        return F.smooth_l1_loss(pred, fraction)
+    if name == "mse":
+        return F.mse_loss(pred, fraction)
+    if name in {"bce", "soft_bce"}:
+        return F.binary_cross_entropy_with_logits(logits, fraction)
+    raise ValueError(f"Unknown window_fraction_loss: {loss_name}")
 
 def loss_components(
     outputs: dict[str, torch.Tensor],
@@ -29,22 +51,43 @@ def loss_components(
     lambda_window: float,
     lambda_dice: float,
     base_pos_weight: float | None = None,
+    window_target_mode: str = "mixed",
+    window_presence_threshold: float = 0.05,
+    lambda_window_fraction: float = 1.0,
+    window_fraction_loss: str = "smooth_l1",
 ) -> dict[str, torch.Tensor]:
     pos_weight = None
     if base_pos_weight is not None:
         pos_weight = torch.tensor(float(base_pos_weight), device=mask.device)
     base_bce = F.binary_cross_entropy_with_logits(outputs["base_logits"], mask, pos_weight=pos_weight)
     dice = dice_loss_from_logits(outputs["base_logits"], mask)
-    window_bce = F.binary_cross_entropy_with_logits(outputs["window_logits"], fraction)
+    presence = window_presence_target(fraction, window_presence_threshold)
+    window_bce = F.binary_cross_entropy_with_logits(outputs["window_logits"], presence)
+    window_regression = window_fraction_loss_from_logits(
+        window_fraction_logits(outputs),
+        fraction,
+        loss_name=window_fraction_loss,
+    )
+    mode = str(window_target_mode).lower()
+    if mode in {"presence", "binary", "classification"}:
+        raw_window_task = window_bce
+    elif mode in {"fraction", "regression"}:
+        raw_window_task = float(lambda_window_fraction) * window_regression
+    elif mode in {"mixed", "presence_fraction", "hybrid"}:
+        raw_window_task = window_bce + float(lambda_window_fraction) * window_regression
+    else:
+        raise ValueError(f"Unknown window_target_mode: {window_target_mode}")
     base_task = base_bce + float(lambda_dice) * dice
-    window_task = float(lambda_window) * window_bce
+    window_task = float(lambda_window) * raw_window_task
     base_fraction = torch.sigmoid(outputs["base_logits"]).mean(dim=1, keepdim=True)
-    window_fraction = torch.sigmoid(outputs["window_logits"])
+    window_fraction = torch.sigmoid(window_fraction_logits(outputs))
     consistency = F.mse_loss(window_fraction, base_fraction)
     return {
         "base_bce": base_bce,
         "dice": dice,
         "window_bce": window_bce,
+        "window_fraction_loss": window_regression,
+        "window_raw_task": raw_window_task,
         "base_task": base_task,
         "window_task": window_task,
         "consistency": consistency,
@@ -87,8 +130,23 @@ def multitask_loss(
     loss_log_vars: torch.nn.ParameterDict | dict[str, torch.Tensor] | None = None,
     gradnorm_log_weights: torch.nn.ParameterDict | dict[str, torch.Tensor] | None = None,
     base_pos_weight: float | None = None,
+    window_target_mode: str = "mixed",
+    window_presence_threshold: float = 0.05,
+    lambda_window_fraction: float = 1.0,
+    window_fraction_loss: str = "smooth_l1",
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    components = loss_components(outputs, mask, fraction, lambda_window, lambda_dice, base_pos_weight)
+    components = loss_components(
+        outputs,
+        mask,
+        fraction,
+        lambda_window,
+        lambda_dice,
+        base_pos_weight,
+        window_target_mode=window_target_mode,
+        window_presence_threshold=window_presence_threshold,
+        lambda_window_fraction=lambda_window_fraction,
+        window_fraction_loss=window_fraction_loss,
+    )
     base_task = components["base_task"]
     window_task = components["window_task"]
     consistency = components["consistency"]

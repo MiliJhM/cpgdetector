@@ -9,9 +9,9 @@ data:
   test_chroms: ["chr19", "chr20", "chr21", "chr22"]
   window_size: 512
   stride: 512
-  max_train_windows: 1000000
-  max_val_windows: 100000
-  max_test_windows: 50000
+  max_train_windows: 200000
+  max_val_windows: 10000
+  max_test_windows: 5000
   positive_fraction: 0.45
   hard_negative_fraction: 0.25
   min_gc_for_hard_negative: .50
@@ -31,10 +31,10 @@ dnabert2_baseline:
   model_max_length: 512
   pad_to_max_length: true
   label_fraction_threshold: 0.0
-  epochs: 3
+  epochs: 2
   max_steps: -1
-  batch_size: 256
-  eval_batch_size: 512
+  batch_size: 128
+  eval_batch_size: 128
   eval_accumulation_steps: 16
   torch_empty_cache_steps: null
   gradient_accumulation_steps: 1

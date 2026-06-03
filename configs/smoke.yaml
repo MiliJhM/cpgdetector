@@ -41,6 +41,10 @@ training:
   lambda_consistency: 0.10
   gradnorm_alpha: 1.5
   gradnorm_lambda: 1.0
+  window_target_mode: mixed
+  window_presence_threshold: 0.05
+  lambda_window_fraction: 1.0
+  window_fraction_loss: smooth_l1
   base_pos_weight: null
   estimate_pos_weight_batches: 256
   amp: true

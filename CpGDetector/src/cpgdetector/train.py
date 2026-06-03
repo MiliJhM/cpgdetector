@@ -19,7 +19,14 @@ from .baseline import (
     traditional_baseline_scores,
 )
 from .data import CpGAnnotations, CpGWindowDataset, GenomeStore
-from .losses import loss_components, multitask_loss, normalized_gradnorm_weights, scalar_loss_parts
+from .losses import (
+    loss_components,
+    multitask_loss,
+    normalized_gradnorm_weights,
+    scalar_loss_parts,
+    window_fraction_logits,
+    window_presence_target,
+)
 from .metrics import BinaryMetricAccumulator, best_threshold, classification_metrics, regression_metrics
 from .model import MultiTaskCpGNet
 from .utils import load_yaml, resolve_device, save_json, save_yaml, set_seed
@@ -170,6 +177,15 @@ def build_scheduler(optimizer: torch.optim.Optimizer, config: dict):
     raise ValueError(f"Unknown scheduler: {name}")
 
 
+def window_task_settings(config: dict) -> dict:
+    train_cfg = config["training"]
+    return {
+        "window_target_mode": str(train_cfg.get("window_target_mode", "mixed")),
+        "window_presence_threshold": float(train_cfg.get("window_presence_threshold", 0.05)),
+        "lambda_window_fraction": float(train_cfg.get("lambda_window_fraction", 1.0)),
+        "window_fraction_loss": str(train_cfg.get("window_fraction_loss", "smooth_l1")),
+    }
+
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
 
@@ -281,6 +297,7 @@ def gradnorm_multitask_loss(
         lambda_window=train_cfg["lambda_window"],
         lambda_dice=train_cfg["lambda_dice"],
         base_pos_weight=base_pos_weight,
+        **window_task_settings(config)
     )
     gradnorm_log_weights = gradnorm_log_weights_for(model, config)
     if gradnorm_log_weights is None:
@@ -375,6 +392,7 @@ def train_one_epoch(
                     mtl_method=config["training"].get("mtl_method", "fixed"),
                     loss_log_vars=loss_log_vars_for(model, config),
                     base_pos_weight=base_pos_weight,
+                    **window_task_settings(config)
                 )
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -423,6 +441,7 @@ def evaluate(
                 loss_log_vars=loss_log_vars_for(model, config),
                 gradnorm_log_weights=gradnorm_log_weights_for(model, config),
                 base_pos_weight=base_pos_weight,
+                **window_task_settings(config)
             )
         batch_size = x.shape[0]
         count += batch_size
@@ -430,10 +449,11 @@ def evaluate(
             losses[key] = losses.get(key, 0.0) + parts[key] * batch_size
         base_scores = torch.sigmoid(outputs["base_logits"])
         window_scores = torch.sigmoid(outputs["window_logits"])
+        fraction_scores = torch.sigmoid(window_fraction_logits(outputs))
         base_acc.update(mask, base_scores)
-        window_acc.update((fraction > 0).float(), window_scores)
-        frac_sse += torch.sum((fraction.double() - window_scores.double()) ** 2)
-        frac_sae += torch.sum(torch.abs(fraction.double() - window_scores.double()))
+        window_acc.update(window_presence_target(fraction, window_task_settings(config)["window_presence_threshold"]), window_scores)
+        frac_sse += torch.sum((fraction.double() - fraction_scores.double()) ** 2)
+        frac_sae += torch.sum(torch.abs(fraction.double() - fraction_scores.double()))
         frac_count += fraction.numel()
 
     if base_threshold is None:
@@ -488,7 +508,8 @@ def collect_model_curve_scores(
         base_targets.append(batch["mask"].numpy().reshape(-1))
         base_scores.append(torch.sigmoid(outputs["base_logits"]).detach().cpu().numpy().reshape(-1))
         fraction = batch["fraction"].numpy().reshape(-1)
-        window_targets.append((fraction > 0).astype(np.int32))
+        threshold = window_task_settings(config)["window_presence_threshold"]
+        window_targets.append((fraction >= threshold).astype(np.int32))
         window_scores.append(torch.sigmoid(outputs["window_logits"]).detach().cpu().numpy().reshape(-1))
     return {
         "CNN base segmentation": (np.concatenate(base_targets), np.concatenate(base_scores)),
