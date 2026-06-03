@@ -116,6 +116,11 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
 def maybe_compile_model(model: torch.nn.Module, enabled: bool) -> torch.nn.Module:
     if not enabled:
         return model
+    try:
+        return torch.compile(model)
+    except Exception as exc:
+        print(f"Warning: torch.compile failed; continuing without compilation: {exc}", file=sys.stderr)
+        return model
 
 
 def build_scheduler(optimizer: torch.optim.Optimizer, config: dict):
@@ -154,11 +159,6 @@ def build_scheduler(optimizer: torch.optim.Optimizer, config: dict):
 
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
-    try:
-        return torch.compile(model)
-    except Exception as exc:
-        print(f"Warning: torch.compile failed; continuing without compilation: {exc}", file=sys.stderr)
-        return model
 
 
 def train_one_epoch(
@@ -376,6 +376,11 @@ def main(argv: list[str] | None = None) -> int:
             f"train_loss={train_metrics['train_loss']:.4f} "
             f"val_base_pr_auc={val_metrics['val_base_pr_auc']:.4f} "
             f"val_base_f1={base_metrics['f1']:.4f} threshold={best_threshold_value:.2f} "
+            f"val_window_pr_auc={val_metrics['val_window_pr_auc']:.4f} "
+            f"val_window_f1={val_metrics['val_window_f1']:.4f} "
+            f"val_window_precision={val_metrics['val_window_precision']:.4f} "
+            f"val_window_recall={val_metrics['val_window_recall']:.4f} "
+            f"val_fraction_mae={val_metrics['val_fraction_mae']:.4f} "
             f"lr={epoch_lr:.3g}"
         )
         score = base_metrics["f1"]

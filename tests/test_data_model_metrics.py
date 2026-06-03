@@ -10,6 +10,7 @@ from cpgdetector.data import CpGAnnotations, CpGWindowDataset, GenomeStore, one_
 from cpgdetector.interval_metrics import evaluate_intervals
 from cpgdetector.model import MultiTaskCpGNet
 from cpgdetector.postprocess import BedInterval, probabilities_to_intervals
+from cpgdetector.train import maybe_compile_model
 
 
 def write_gz_fasta(path: Path, name: str, sequence: str) -> None:
@@ -80,6 +81,11 @@ def test_model_outputs():
     out = model(x)
     assert out["base_logits"].shape == (2, 64)
     assert out["window_logits"].shape == (2, 1)
+
+
+def test_maybe_compile_model_returns_model_when_disabled():
+    model = MultiTaskCpGNet(channels=[8], kernels=[3], dilations=[1], dropout=0.0)
+    assert maybe_compile_model(model, enabled=False) is model
 
 
 def test_postprocess_and_interval_metrics():
