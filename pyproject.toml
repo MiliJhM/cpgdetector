@@ -17,6 +17,11 @@ dependencies = [
     "tqdm>=4.66",
     "pytest>=8.2",
     "triton",
+    "transformers>=4.40",
+    "accelerate>=0.29",
+    "datasets>=2.18",
+    "evaluate>=0.4",
+    "einops>=0.6",
 ]
 
 [tool.setuptools.packages.find]

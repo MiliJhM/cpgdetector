@@ -24,4 +24,3 @@ runs/
 __pycache__/
 *.pyc
 *.egg-info/
-docs/

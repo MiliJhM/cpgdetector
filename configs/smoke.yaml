@@ -35,8 +35,10 @@ training:
   plateau_factor: 0.5
   plateau_patience: 2
   weight_decay: 0.01
+  mtl_method: uncertainty
   lambda_window: 0.25
   lambda_dice: 0.20
+  lambda_consistency: 0.10
   base_pos_weight: null
   estimate_pos_weight_batches: 256
   amp: true
@@ -47,6 +49,35 @@ training:
   prefetch_factor: 2
   metric_bins: 512
   threshold_grid: [0.20, 0.30, 0.40, 0.50, .60, 0.70, 0.80]
+
+dnabert2_baseline:
+  enabled: false
+  model_name: zhihan1996/DNABERT-2-117M
+  output_dir: runs/smoke/dnabert2_baseline
+  model_max_length: 128
+  pad_to_max_length: true
+  label_fraction_threshold: 0.0
+  epochs: 1
+  batch_size: 2
+  eval_batch_size: 4
+  gradient_accumulation_steps: 1
+  lr: 0.00003
+  weight_decay: 0.01
+  warmup_steps: 5
+  max_grad_norm: 1.0
+  eval_steps: 20
+  save_steps: 20
+  save_total_limit: 1
+  logging_steps: 5
+  early_stopping_patience: 2
+  metric_for_best_model: f1
+  fp16: true
+  pin_memory: true
+  num_workers: 0
+  report_to: none
+  max_train_windows: 64
+  max_val_windows: 32
+  max_test_windows: 32
 
 prediction:
   batch_size: 1024

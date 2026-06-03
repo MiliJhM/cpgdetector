@@ -4,6 +4,8 @@ CpGDetector implements a PyTorch pipeline for CpG island detection on GRCh38.p14
 
 The model shares a dilated 1D convolution encoder, then uses task-specific adapters before each output head. The base head predicts one CpG island logit per base. The window head uses a 1x1 linear projection plus learned attention pooling over positions, instead of plain average pooling, so it can learn which bases in the window drive the window-level CpG island signal.
 
+Training uses multitask learning by default: a base-window consistency loss aligns the window probability with the mean base probability, and uncertainty weighting learns the relative weights of the base segmentation and window auxiliary tasks. Set `training.mtl_method: fixed` to recover static loss weighting.
+
 ## Environment
 
 The project is configured for the local RTX 3080 Laptop GPU and installs the CUDA 13.0 PyTorch wheel.
@@ -53,6 +55,28 @@ python -m cpgdetector.train --config configs/default.yaml
 ```
 
 The default configuration is tuned for server-side GPU training: CUDA, AMP, `pin_memory`, batch size 2048, prediction batch size 2048, `num_workers: 8`, persistent workers, and prefetching. On Windows or memory-constrained machines, reduce `training.num_workers` to 0.
+
+## DNABERT2 Window Baseline
+
+The DNABERT2 baseline adapts the fine-tuning setup from `WeitangSun/CpG_transformer` to this project's existing windows. It trains a window-level sequence classifier with `zhihan1996/DNABERT-2-117M`; it does not generate or reuse the external repository's CSV dataset.
+
+```powershell
+python -m cpgdetector.dnabert2_baseline --config configs/default.yaml
+```
+
+Configuration lives under `dnabert2_baseline` in `configs/default.yaml`. Notes on dataset differences and expected metric impact are in `docs/dnabert2_baseline_notes.md`.
+
+To include this baseline in the full evaluation pipeline:
+
+```powershell
+.\scripts\run_full.ps1 -RunDNABERT2
+```
+
+```bash
+RUN_DNABERT2=1 bash scripts/run_full.sh
+```
+
+Alternatively, set `dnabert2_baseline.enabled: true` in the active config. The pipeline writes DNABERT2 metrics to `runs/<run>/dnabert2_baseline/dnabert2_metrics.json` and regenerates the main baseline comparison and ROC/PR plots with the DNABERT2 validation curve included.
 
 ## One-Command Full Run
 

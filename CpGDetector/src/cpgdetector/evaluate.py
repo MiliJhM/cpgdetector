@@ -10,6 +10,7 @@ from .interval_metrics import evaluate_intervals, intervals_from_annotation
 from .model import MultiTaskCpGNet
 from .postprocess import probabilities_to_intervals
 from .predict import predict_chromosome
+from .train import load_model_state_compatible
 from .utils import normalize_chrom, resolve_device, save_json
 
 
@@ -25,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     config = checkpoint["config"]
     device = resolve_device(config.get("device", "auto"))
     model = MultiTaskCpGNet(**config["model"])
-    model.load_state_dict(checkpoint["model_state"])
+    load_model_state_compatible(model, checkpoint["model_state"])
     model.to(device)
     genome = GenomeStore(config["data"]["genome_dir"])
     annotations = CpGAnnotations(config["data"]["cpg_table"])

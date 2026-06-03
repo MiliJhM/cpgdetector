@@ -11,6 +11,7 @@ from tqdm import tqdm
 from .data import CpGAnnotations, GenomeStore, valid_encoded_window
 from .model import MultiTaskCpGNet
 from .postprocess import probabilities_to_intervals, write_bed, write_bedgraph
+from .train import load_model_state_compatible
 from .utils import load_yaml, normalize_chrom, resolve_device
 
 
@@ -78,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         config.update(load_yaml(args.config))
     device = resolve_device(config.get("device", "auto"))
     model = MultiTaskCpGNet(**config["model"])
-    model.load_state_dict(checkpoint["model_state"])
+    load_model_state_compatible(model, checkpoint["model_state"])
     model.to(device)
     genome = GenomeStore(config["data"]["genome_dir"])
     chroms = args.chrom or config["data"].get("test_chroms", ["chr22"])

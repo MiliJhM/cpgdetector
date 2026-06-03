@@ -20,6 +20,11 @@ def main(argv: list[str] | None = None) -> int:
     if (run_dir / "interval_metrics.json").exists():
         with open(run_dir / "interval_metrics.json", "r", encoding="utf-8") as handle:
             interval_metrics = json.load(handle)
+    dnabert2_metrics = None
+    dnabert2_metrics_path = run_dir / "dnabert2_baseline" / "dnabert2_metrics.json"
+    if dnabert2_metrics_path.exists():
+        with open(dnabert2_metrics_path, "r", encoding="utf-8") as handle:
+            dnabert2_metrics = json.load(handle)
     metrics = pd.read_csv(run_dir / "metrics.csv")
     best_idx = metrics["val_base_best_f1"].idxmax() if "val_base_best_f1" in metrics else metrics["val_base_f1"].idxmax()
     best = metrics.loc[best_idx]
@@ -47,6 +52,7 @@ The UCSC table uses 0-based half-open coordinates. Labels are generated as base-
 - Base segmentation head: `Conv1d(..., 1, kernel_size=1)` producing one logit per base.
 - Window auxiliary head: task-specific 1x1 linear projection, learned attention pooling over sequence positions, and an MLP output.
 - Loss: base BCE + Dice loss + weighted window BCE.
+- Multitask learning: {summary.get("mtl_method", "fixed")}; base-window consistency weight: {summary.get("lambda_consistency", "NA")}; learned loss weights: {summary.get("loss_weights", "NA")}.
 - Learning-rate scheduler: {summary.get("scheduler", "NA")}; final LR: {summary.get("final_lr", "NA")}.
 - CUDA AMP is enabled when a CUDA device is available.
 
@@ -80,6 +86,10 @@ The logistic regression baseline uses GC fraction, observed/expected CpG ratio, 
 - PR-AUC: {logistic.get("pr_auc", "NA")}
 - F1: {logistic.get("f1", "NA")}
 
+## DNABERT2 Window Baseline
+
+{format_dnabert2_metrics(dnabert2_metrics)}
+
 ## Interval-Level Evaluation
 
 {format_interval_metrics(interval_metrics)}
@@ -91,6 +101,7 @@ The logistic regression baseline uses GC fraction, observed/expected CpG ratio, 
 - Training curves: `{run_dir / "training_curves.png"}`
 - Baseline comparison plot: `{run_dir / "baseline_comparison.png"}`
 - ROC/PR curve plot: `{run_dir / "roc_pr_curves.png"}`
+- DNABERT2 baseline metrics, when enabled: `{run_dir / "dnabert2_baseline" / "dnabert2_metrics.json"}`
 - Prediction BED after running prediction: `{run_dir / "predicted_cpg_islands.bed"}`
 - Optional prediction signal track: `{run_dir / "predicted_cpg_signal.bedGraph"}`
 
@@ -117,6 +128,27 @@ def format_interval_metrics(interval_metrics: dict | None) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def format_dnabert2_metrics(metrics: dict | None) -> str:
+    if not metrics:
+        return "DNABERT2 baseline was not run for this pipeline execution."
+    validation = metrics.get("validation", {})
+    test = metrics.get("test", {})
+    return "\n".join(
+        [
+            f"- Model: `{metrics.get('model_name', 'NA')}`",
+            f"- Train/validation/test windows: {metrics.get('train_windows')}/{metrics.get('val_windows')}/{metrics.get('test_windows')}",
+            f"- Validation ROC-AUC: {validation.get('val_roc_auc', 'NA')}",
+            f"- Validation PR-AUC: {validation.get('val_pr_auc', 'NA')}",
+            f"- Validation F1: {validation.get('val_f1', 'NA')}",
+            f"- Test ROC-AUC: {test.get('test_roc_auc', 'NA')}",
+            f"- Test PR-AUC: {test.get('test_pr_auc', 'NA')}",
+            f"- Test F1: {test.get('test_f1', 'NA')}",
+            "",
+            "This baseline is window-level only and is directly comparable to the CNN window head, not to the base segmentation head.",
+        ]
+    )
 
 
 if __name__ == "__main__":

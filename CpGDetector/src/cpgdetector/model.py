@@ -87,6 +87,12 @@ class MultiTaskCpGNet(nn.Module):
         self.window_adapter = TaskAdapter(in_channels, dropout)
         self.base_head = nn.Conv1d(in_channels, 1, kernel_size=1)
         self.window_head = AttentionWindowHead(in_channels, window_hidden_channels, dropout)
+        self.loss_log_vars = nn.ParameterDict(
+            {
+                "base": nn.Parameter(torch.zeros(())),
+                "window": nn.Parameter(torch.zeros(())),
+            }
+        )
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         features = self.encoder(x)

@@ -4,6 +4,7 @@ param(
     [string]$Config = "configs/default.yaml",
     [string]$RunDir = "runs/default",
     [string[]]$PredChroms = @("chr19", "chr20", "chr21", "chr22"),
+    [switch]$RunDNABERT2,
     [switch]$Profile,
     [int]$ProfileBatches = 30
 )
@@ -35,6 +36,7 @@ Write-Log "Conda env: $EnvName"
 Write-Log "Config: $Config"
 Write-Log "Run dir: $RunDir"
 Write-Log "Prediction chromosomes: $($PredChroms -join ', ')"
+Write-Log "Run DNABERT2 baseline switch: $RunDNABERT2"
 
 if (-not (Get-Command conda -ErrorAction SilentlyContinue)) {
     throw "conda was not found on PATH"
@@ -59,6 +61,13 @@ foreach ($Required in $RequiredFiles) {
         throw "Required file is missing: $Required"
     }
 }
+
+$ConfigDNABERT2 = & conda run -n $EnvName python -c "from cpgdetector.utils import load_yaml; import sys; cfg=load_yaml(sys.argv[1]); print('1' if cfg.get('dnabert2_baseline', {}).get('enabled', False) else '0')" $Config
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to read dnabert2_baseline.enabled from config"
+}
+$ShouldRunDNABERT2 = [bool]$RunDNABERT2 -or (($ConfigDNABERT2 | Select-Object -Last 1).Trim() -eq "1")
+Write-Log "Run DNABERT2 baseline effective: $ShouldRunDNABERT2"
 
 Write-Log "Checking Python, PyTorch, and CUDA"
 Invoke-CondaPython @(
@@ -98,6 +107,22 @@ $EvaluateArgs = @(
 ) + $PredArgs + @("--output", (Join-Path $RunDir "interval_metrics.json"))
 Invoke-CondaPython $EvaluateArgs
 
+if ($ShouldRunDNABERT2) {
+    $DNABERT2Dir = Join-Path $RunDir "dnabert2_baseline"
+    Write-Log "Training DNABERT2 window baseline"
+    Invoke-CondaPython @(
+        "-m", "cpgdetector.dnabert2_baseline",
+        "--config", $Config,
+        "--output-dir", $DNABERT2Dir
+    )
+}
+
+Write-Log "Regenerating baseline comparison plots"
+Invoke-CondaPython @(
+    "-m", "cpgdetector.compare_baselines",
+    "--run-dir", $RunDir
+)
+
 Write-Log "Generating report"
 Invoke-CondaPython @(
     "-m", "cpgdetector.report",
@@ -112,6 +137,10 @@ Write-Log "  $(Join-Path $RunDir 'metrics.csv')"
 Write-Log "  $(Join-Path $RunDir 'training_curves.png')"
 Write-Log "  $(Join-Path $RunDir 'baseline_comparison.png')"
 Write-Log "  $(Join-Path $RunDir 'roc_pr_curves.png')"
+if ($ShouldRunDNABERT2) {
+    Write-Log "  $(Join-Path $RunDir 'dnabert2_baseline/dnabert2_metrics.json')"
+    Write-Log "  $(Join-Path $RunDir 'dnabert2_baseline/dnabert2_roc_pr_curves.png')"
+}
 Write-Log "  $(Join-Path $RunDir 'predicted_cpg_islands.bed')"
 Write-Log "  $(Join-Path $RunDir 'interval_metrics.json')"
 Write-Log "  $(Join-Path $RunDir 'report.md')"

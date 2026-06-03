@@ -42,7 +42,12 @@ def plot_training_curves(metrics_csv: str | Path, output_path: str | Path) -> No
     plt.close(fig)
 
 
-def plot_baseline_comparison(metrics_csv: str | Path, summary_json: str | Path, output_path: str | Path) -> None:
+def plot_baseline_comparison(
+    metrics_csv: str | Path,
+    summary_json: str | Path,
+    output_path: str | Path,
+    extra_window_baselines: dict[str, dict] | None = None,
+) -> None:
     """Plot ROC-AUC, PR-AUC, F1, precision, recall, and accuracy against baselines."""
     metrics_df = pd.read_csv(metrics_csv)
     with open(summary_json, "r", encoding="utf-8") as handle:
@@ -62,18 +67,21 @@ def plot_baseline_comparison(metrics_csv: str | Path, summary_json: str | Path, 
         "Traditional\nrule": _baseline_metrics(summary.get("traditional_baseline_window", {}), metric_keys),
         "Logistic\nbaseline": _baseline_metrics(summary.get("logistic_baseline_window", {}), metric_keys),
     }
+    for name, values in (extra_window_baselines or {}).items():
+        series[name] = _baseline_metrics(values, metric_keys)
 
     x = np.arange(len(metric_keys))
-    width = 0.18
-    fig, ax = plt.subplots(figsize=(12, 5))
+    width = min(0.16, 0.82 / max(len(series), 1))
+    center = (len(series) - 1) / 2
+    fig, ax = plt.subplots(figsize=(13, 5))
     for offset, (name, values) in enumerate(series.items()):
-        ax.bar(x + (offset - 1.5) * width, values, width=width, label=name)
+        ax.bar(x + (offset - center) * width, values, width=width, label=name)
     ax.set_xticks(x)
     ax.set_xticklabels(metric_labels)
     ax.set_ylim(0, 1.05)
     ax.set_ylabel("Score")
     ax.set_title("CNN and Baseline Metric Comparison")
-    ax.legend(ncol=2)
+    ax.legend(ncol=3 if len(series) > 4 else 2)
     ax.grid(axis="y", alpha=0.25)
     ax.text(
         0.01,

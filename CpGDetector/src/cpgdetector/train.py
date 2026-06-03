@@ -113,6 +113,15 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     return model._orig_mod if hasattr(model, "_orig_mod") else model
 
 
+def load_model_state_compatible(model: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> None:
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    meaningful_missing = [key for key in missing if not key.startswith("loss_log_vars.")]
+    if meaningful_missing or unexpected:
+        raise RuntimeError(
+            f"Checkpoint is incompatible. Missing keys: {meaningful_missing}; unexpected keys: {unexpected}"
+        )
+
+
 def maybe_compile_model(model: torch.nn.Module, enabled: bool) -> torch.nn.Module:
     if not enabled:
         return model
@@ -161,6 +170,36 @@ def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
 
 
+def loss_log_vars_for(model: torch.nn.Module, config: dict) -> torch.nn.ParameterDict | None:
+    method = str(config["training"].get("mtl_method", "fixed")).lower()
+    if method not in {"uncertainty", "uncertainty_weighting"}:
+        return None
+    return getattr(unwrap_model(model), "loss_log_vars")
+
+
+def current_loss_weights(model: torch.nn.Module) -> dict[str, float]:
+    log_vars = getattr(unwrap_model(model), "loss_log_vars", None)
+    if log_vars is None:
+        return {}
+    return {f"{key}_loss_weight": float(torch.exp(-value.detach()).cpu()) for key, value in log_vars.items()}
+
+
+def optimizer_parameter_groups(model: torch.nn.Module, weight_decay: float) -> list[dict]:
+    decay_params = []
+    no_decay_params = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name.startswith("loss_log_vars."):
+            no_decay_params.append(parameter)
+        else:
+            decay_params.append(parameter)
+    groups = [{"params": decay_params, "weight_decay": float(weight_decay)}]
+    if no_decay_params:
+        groups.append({"params": no_decay_params, "weight_decay": 0.0})
+    return groups
+
+
 def train_one_epoch(
     model: MultiTaskCpGNet,
     loader: DataLoader,
@@ -172,7 +211,7 @@ def train_one_epoch(
 ) -> dict[str, float]:
     model.train()
     amp_enabled = bool(config["training"].get("amp", True)) and device.type == "cuda"
-    totals = {"loss": 0.0, "base_bce": 0.0, "dice": 0.0, "window_bce": 0.0}
+    totals: dict[str, float] = {}
     count = 0
     for batch in tqdm(loader, desc="train", leave=False, ascii=True):
         x = batch["x"].to(device, non_blocking=True)
@@ -187,6 +226,9 @@ def train_one_epoch(
                 fraction,
                 lambda_window=config["training"]["lambda_window"],
                 lambda_dice=config["training"]["lambda_dice"],
+                lambda_consistency=config["training"].get("lambda_consistency", 0.0),
+                mtl_method=config["training"].get("mtl_method", "fixed"),
+                loss_log_vars=loss_log_vars_for(model, config),
                 base_pos_weight=base_pos_weight,
             )
         scaler.scale(loss).backward()
@@ -194,8 +236,8 @@ def train_one_epoch(
         scaler.update()
         batch_size = x.shape[0]
         count += batch_size
-        for key in totals:
-            totals[key] += parts[key] * batch_size
+        for key in parts:
+            totals[key] = totals.get(key, 0.0) + parts[key] * batch_size
     return {f"train_{key}": value / max(count, 1) for key, value in totals.items()}
 
 
@@ -210,7 +252,7 @@ def evaluate(
 ) -> tuple[dict[str, float], float, dict[str, float]]:
     model.eval()
     amp_enabled = bool(config["training"].get("amp", True)) and device.type == "cuda"
-    losses = {"loss": 0.0, "base_bce": 0.0, "dice": 0.0, "window_bce": 0.0}
+    losses: dict[str, float] = {}
     count = 0
     thresholds = [float(x) for x in config["training"]["threshold_grid"]]
     bins = int(config["training"].get("metric_bins", 2048))
@@ -231,12 +273,15 @@ def evaluate(
                 fraction,
                 lambda_window=config["training"]["lambda_window"],
                 lambda_dice=config["training"]["lambda_dice"],
+                lambda_consistency=config["training"].get("lambda_consistency", 0.0),
+                mtl_method=config["training"].get("mtl_method", "fixed"),
+                loss_log_vars=loss_log_vars_for(model, config),
                 base_pos_weight=base_pos_weight,
             )
         batch_size = x.shape[0]
         count += batch_size
-        for key in losses:
-            losses[key] += parts[key] * batch_size
+        for key in parts:
+            losses[key] = losses.get(key, 0.0) + parts[key] * batch_size
         base_scores = torch.sigmoid(outputs["base_logits"])
         window_scores = torch.sigmoid(outputs["window_logits"])
         base_acc.update(mask, base_scores)
@@ -305,6 +350,16 @@ def collect_model_curve_scores(
     }
 
 
+def save_curve_scores(series: dict[str, tuple[np.ndarray, np.ndarray]], output_path: str | Path) -> None:
+    payload: dict[str, np.ndarray] = {"labels": np.asarray(list(series.keys()), dtype=object)}
+    for idx, (_label, (targets, scores)) in enumerate(series.items()):
+        payload[f"series_{idx}_targets"] = np.asarray(targets)
+        payload[f"series_{idx}_scores"] = np.asarray(scores)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(output_path, **payload)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Train the CpG multitask segmentation model.")
     parser.add_argument("--config", default="configs/default.yaml")
@@ -351,7 +406,10 @@ def main(argv: list[str] | None = None) -> int:
     train_loader = dataloader(train_ds, config, shuffle=True)
     val_loader = dataloader(val_ds, config, shuffle=False)
     model = MultiTaskCpGNet(**config["model"]).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["training"]["lr"]), weight_decay=float(config["training"]["weight_decay"]))
+    optimizer = torch.optim.AdamW(
+        optimizer_parameter_groups(model, float(config["training"]["weight_decay"])),
+        lr=float(config["training"]["lr"]),
+    )
     scheduler, scheduler_name = build_scheduler(optimizer, config)
     scaler = torch.amp.GradScaler(device.type, enabled=bool(config["training"].get("amp", True)) and device.type == "cuda")
 
@@ -381,6 +439,9 @@ def main(argv: list[str] | None = None) -> int:
             f"val_window_precision={val_metrics['val_window_precision']:.4f} "
             f"val_window_recall={val_metrics['val_window_recall']:.4f} "
             f"val_fraction_mae={val_metrics['val_fraction_mae']:.4f} "
+            f"train_consistency={train_metrics.get('train_consistency', 0.0):.4f} "
+            f"base_w={train_metrics.get('train_base_loss_weight', 1.0):.3g} "
+            f"window_w={train_metrics.get('train_window_loss_weight', 1.0):.3g} "
             f"lr={epoch_lr:.3g}"
         )
         score = base_metrics["f1"]
@@ -420,13 +481,16 @@ def main(argv: list[str] | None = None) -> int:
         "base_pos_weight": base_pos_weight,
         "scheduler": scheduler_name,
         "final_lr": current_lr(optimizer),
+        "mtl_method": config["training"].get("mtl_method", "fixed"),
+        "lambda_consistency": config["training"].get("lambda_consistency", 0.0),
+        "loss_weights": current_loss_weights(model),
         "traditional_baseline_window": baseline_metrics,
         "logistic_baseline_window": logistic_metrics,
     }
     save_json(summary, run_dir / "summary.json")
     plot_baseline_comparison(run_dir / "metrics.csv", run_dir / "summary.json", run_dir / "baseline_comparison.png")
     checkpoint = torch.load(run_dir / "best_model.pt", map_location=device, weights_only=False)
-    unwrap_model(model).load_state_dict(checkpoint["model_state"])
+    load_model_state_compatible(unwrap_model(model), checkpoint["model_state"])
     curve_series = collect_model_curve_scores(model, val_loader, device, config)
     curve_series["Traditional rule"] = traditional_baseline_scores(val_ds, max_items=min(5000, len(val_ds)))
     curve_series["Logistic baseline"] = logistic_baseline_scores(
@@ -435,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
         max_train=min(10000, len(train_ds)),
         max_val=min(5000, len(val_ds)),
     )
+    save_curve_scores(curve_series, run_dir / "curve_scores.npz")
     plot_roc_pr_curves(
         curve_series,
         run_dir / "roc_pr_curves.png",

@@ -17,43 +17,11 @@ data:
   min_gc_for_hard_negative: .50
   boundary_fl: 2000
 
-model:
-  channels: [64, 128, 256, 512]
-  kernels: [9, 7, 5, 3]
-  dilations: [1, 1, 1, 1]
-  dropout: 0.10
-  window_hidden_channels: 256
-
-training:
-  epochs: 50
-  batch_size: 2048
-  compile: True
-  lr: 0.001
-  min_lr: 0.00002
-  scheduler: warmup_cosine
-  warmup_epochs: 3
-  plateau_factor: 0.5
-  plateau_patience: 3
-  weight_decay: 0.01
-  mtl_method: uncertainty
-  lambda_window: 0.40
-  lambda_dice: 0.20
-  lambda_consistency: 0.10
-  base_pos_weight: null
-  estimate_pos_weight_batches: 2048
-  amp: true
-  pin_memory: true
-  early_stopping_patience: 10
-  num_workers: 8
-  persistent_workers: true
-  prefetch_factor: 4
-  metric_bins: 2048
-  threshold_grid: [0.20, 0.25, 0.30, .35, .40, 0.45, 0.60, 0.70, 0.80]
 
 dnabert2_baseline:
-  enabled: false
+  enabled: true
   model_name: zhihan1996/DNABERT-2-117M
-  output_dir: runs/default/dnabert2_baseline
+  output_dir: runs/remote/dnabert2_baseline
   model_max_length: 512
   pad_to_max_length: true
   label_fraction_threshold: 0.0
@@ -79,6 +47,7 @@ dnabert2_baseline:
   max_val_windows: null
   max_test_windows: null
 
+  
 prediction:
   batch_size: 2048
   write_bedgraph: false
@@ -90,4 +59,4 @@ postprocess:
   window_threshold: 0.10
 
 output:
-  run_dir: runs/default
+  run_dir: runs/remote

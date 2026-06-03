@@ -7,7 +7,9 @@ import numpy as np
 import torch
 
 from cpgdetector.data import CpGAnnotations, CpGWindowDataset, GenomeStore, one_hot_encode
+from cpgdetector.dnabert2_baseline import DNABERT2WindowDataset
 from cpgdetector.interval_metrics import evaluate_intervals
+from cpgdetector.losses import multitask_loss
 from cpgdetector.model import MultiTaskCpGNet
 from cpgdetector.postprocess import BedInterval, probabilities_to_intervals
 from cpgdetector.train import maybe_compile_model
@@ -69,6 +71,28 @@ def test_mask_and_dataset(tmp_path: Path):
     assert item["fraction"].shape == (1,)
 
 
+def test_dnabert2_window_dataset_uses_existing_windows(tmp_path: Path):
+    genome_dir, table = make_fixture(tmp_path)
+    genome = GenomeStore(genome_dir)
+    annotations = CpGAnnotations(table)
+    source = CpGWindowDataset(
+        genome=genome,
+        annotations=annotations,
+        chroms=["chr21"],
+        window_size=20,
+        stride=10,
+        max_windows=4,
+        seed=1,
+        mode="val",
+    )
+    dataset = DNABERT2WindowDataset(source)
+    item = dataset[0]
+    assert set(item) == {"sequence", "labels", "fraction", "chrom", "start"}
+    assert len(item["sequence"]) == 20
+    assert item["labels"] in {0, 1}
+    assert item["chrom"] == "chr21"
+
+
 def test_model_outputs():
     model = MultiTaskCpGNet(
         channels=[8, 16],
@@ -81,6 +105,30 @@ def test_model_outputs():
     out = model(x)
     assert out["base_logits"].shape == (2, 64)
     assert out["window_logits"].shape == (2, 1)
+    assert set(model.loss_log_vars) == {"base", "window"}
+
+
+def test_uncertainty_multitask_loss_backpropagates_weights():
+    model = MultiTaskCpGNet(channels=[8], kernels=[3], dilations=[1], dropout=0.0)
+    x = torch.randn(2, 4, 16)
+    outputs = model(x)
+    mask = torch.randint(0, 2, (2, 16)).float()
+    fraction = mask.mean(dim=1, keepdim=True)
+    loss, parts = multitask_loss(
+        outputs,
+        mask,
+        fraction,
+        lambda_window=0.4,
+        lambda_dice=0.2,
+        lambda_consistency=0.1,
+        mtl_method="uncertainty",
+        loss_log_vars=model.loss_log_vars,
+    )
+    loss.backward()
+    assert "consistency" in parts
+    assert "base_loss_weight" in parts
+    assert model.loss_log_vars["base"].grad is not None
+    assert model.loss_log_vars["window"].grad is not None
 
 
 def test_maybe_compile_model_returns_model_when_disabled():
