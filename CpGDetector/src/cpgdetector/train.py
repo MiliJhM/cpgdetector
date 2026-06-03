@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 from pathlib import Path
@@ -18,7 +19,7 @@ from .baseline import (
     logistic_baseline_scores,
     traditional_baseline_scores,
 )
-from .data import CpGAnnotations, CpGWindowDataset, GenomeStore
+from .data import CpGAnnotations, CpGWindowDataset, GenomeStore, valid_encoded_window
 from .losses import (
     loss_components,
     multitask_loss,
@@ -30,7 +31,7 @@ from .losses import (
 from .metrics import BinaryMetricAccumulator, best_threshold, classification_metrics, regression_metrics
 from .model import MultiTaskCpGNet
 from .utils import load_yaml, resolve_device, save_json, save_yaml, set_seed
-from .visualize import plot_baseline_comparison, plot_roc_pr_curves, plot_training_curves
+from .visualize import plot_baseline_comparison, plot_region_prediction, plot_roc_pr_curves, plot_training_curves
 
 
 def build_dataset(config: dict, split: str, genome: GenomeStore, annotations: CpGAnnotations) -> CpGWindowDataset:

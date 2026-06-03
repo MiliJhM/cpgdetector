@@ -142,6 +142,79 @@ def plot_roc_pr_curves(
     plt.close(fig)
 
 
+def plot_region_prediction(
+    chrom: str,
+    start: int,
+    end: int,
+    probabilities: np.ndarray,
+    truth_mask: np.ndarray,
+    intervals: np.ndarray,
+    sequence: str,
+    output_path: str | Path,
+    threshold: float = 0.5,
+) -> None:
+    """Visualize per-base model probabilities on one validation genomic region."""
+    start = int(start)
+    end = int(end)
+    probabilities = np.asarray(probabilities, dtype=np.float64).reshape(-1)
+    truth_mask = np.asarray(truth_mask, dtype=np.float64).reshape(-1)
+    if len(probabilities) != end - start or len(truth_mask) != end - start:
+        raise ValueError("Region probabilities and truth mask must match end - start")
+
+    x = np.arange(start, end)
+    rel_x = x - start
+    gc_track = _rolling_gc(sequence, window=min(101, max(5, len(sequence) // 20)))
+    cpg_positions = np.array([idx for idx in range(max(0, len(sequence) - 1)) if sequence[idx : idx + 2].upper() == "CG"])
+
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(14, 6.5),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3.5, 1.2]},
+    )
+    ax = axes[0]
+    ax.fill_between(rel_x, 0, 1, where=truth_mask > 0.5, color="#d8f3dc", alpha=0.75, step="mid", label="UCSC CpG island")
+    for iv_start, iv_end in np.asarray(intervals, dtype=np.int64).reshape(-1, 2):
+        left = max(start, int(iv_start)) - start
+        right = min(end, int(iv_end)) - start
+        if left < right:
+            ax.axvspan(left, right, color="#95d5b2", alpha=0.22)
+            ax.axvline(left, color="#2d6a4f", linestyle="--", linewidth=1.0, alpha=0.8)
+            ax.axvline(right, color="#2d6a4f", linestyle="--", linewidth=1.0, alpha=0.8)
+    ax.plot(rel_x, probabilities, color="#1d4ed8", linewidth=1.8, label="Model CpG island probability")
+    ax.axhline(float(threshold), color="#dc2626", linestyle=":", linewidth=1.5, label=f"Selected threshold={threshold:.2f}")
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_ylabel("Probability")
+    ax.set_title(f"Validation Region CpG Island Prediction: {chrom}:{start:,}-{end:,}")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(loc="upper right", ncol=2, fontsize=9)
+
+    ax2 = axes[1]
+    ax2.plot(rel_x, gc_track, color="#52525b", linewidth=1.2, label="Rolling GC fraction")
+    if cpg_positions.size:
+        ax2.vlines(cpg_positions, 0, 0.12, color="#7c3aed", alpha=0.35, linewidth=0.7, label="CpG dinucleotide")
+    ax2.fill_between(rel_x, 0, truth_mask * 0.18, color="#2d6a4f", alpha=0.25, step="mid")
+    ax2.set_ylim(0, 1.02)
+    ax2.set_ylabel("GC")
+    ax2.set_xlabel(f"Position within selected region (absolute start: {chrom}:{start:,})")
+    ax2.grid(axis="y", alpha=0.2)
+    ax2.legend(loc="upper right", fontsize=9)
+
+    fig.text(
+        0.01,
+        0.01,
+        "Green shading marks annotated CpG island bases; dashed lines mark island boundaries. "
+        "The curve is averaged across overlapping model windows.",
+        fontsize=9,
+    )
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _cnn_metrics(row: pd.Series, prefix: str, metric_keys: list[str]) -> list[float]:
     values = []
     for key in metric_keys:
@@ -152,3 +225,15 @@ def _cnn_metrics(row: pd.Series, prefix: str, metric_keys: list[str]) -> list[fl
 
 def _baseline_metrics(metrics: dict, metric_keys: list[str]) -> list[float]:
     return [float(metrics.get(key, np.nan)) for key in metric_keys]
+
+
+def _rolling_gc(sequence: str, window: int) -> np.ndarray:
+    sequence = sequence.upper()
+    if not sequence:
+        return np.zeros(0, dtype=np.float64)
+    window = max(1, int(window))
+    gc = np.fromiter((1.0 if base in {"G", "C"} else 0.0 for base in sequence), dtype=np.float64)
+    kernel = np.ones(window, dtype=np.float64)
+    counts = np.convolve(np.ones_like(gc), kernel, mode="same")
+    sums = np.convolve(gc, kernel, mode="same")
+    return sums / np.maximum(counts, 1.0)
