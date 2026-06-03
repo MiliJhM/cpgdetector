@@ -19,7 +19,7 @@ from .baseline import (
     traditional_baseline_scores,
 )
 from .data import CpGAnnotations, CpGWindowDataset, GenomeStore
-from .losses import multitask_loss
+from .losses import loss_components, multitask_loss, normalized_gradnorm_weights, scalar_loss_parts
 from .metrics import BinaryMetricAccumulator, best_threshold, classification_metrics, regression_metrics
 from .model import MultiTaskCpGNet
 from .utils import load_yaml, resolve_device, save_json, save_yaml, set_seed
@@ -115,7 +115,11 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
 
 def load_model_state_compatible(model: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> None:
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    meaningful_missing = [key for key in missing if not key.startswith("loss_log_vars.")]
+    meaningful_missing = [
+        key
+        for key in missing
+        if not key.startswith("loss_log_vars.") and not key.startswith("gradnorm_log_weights.")
+    ]
     if meaningful_missing or unexpected:
         raise RuntimeError(
             f"Checkpoint is incompatible. Missing keys: {meaningful_missing}; unexpected keys: {unexpected}"
@@ -170,6 +174,41 @@ def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
 
 
+def monitor_settings(config: dict) -> dict:
+    train_cfg = config["training"]
+    monitor_cfg = dict(train_cfg.get("monitor", {}))
+    return {
+        "base_metric": str(monitor_cfg.get("base_metric", "val_base_best_f1")),
+        "window_metric": str(monitor_cfg.get("window_metric", "val_window_pr_auc")),
+        "base_weight": float(monitor_cfg.get("base_weight", 0.70)),
+        "window_weight": float(monitor_cfg.get("window_weight", 0.30)),
+    }
+
+
+def composite_monitor_score(row: dict[str, float], config: dict) -> float:
+    settings = monitor_settings(config)
+    base_metric = settings["base_metric"]
+    window_metric = settings["window_metric"]
+    if base_metric not in row:
+        raise KeyError(f"Monitor base metric '{base_metric}' is not available in epoch metrics")
+    if window_metric not in row:
+        raise KeyError(f"Monitor window metric '{window_metric}' is not available in epoch metrics")
+    base_weight = settings["base_weight"]
+    window_weight = settings["window_weight"]
+    if base_weight < 0 or window_weight < 0:
+        raise ValueError("Monitor weights must be non-negative")
+    total_weight = base_weight + window_weight
+    if total_weight <= 0:
+        raise ValueError("At least one monitor weight must be positive")
+    base_value = float(row[base_metric])
+    window_value = float(row[window_metric])
+    if not math.isfinite(base_value):
+        base_value = 0.0
+    if not math.isfinite(window_value):
+        window_value = 0.0
+    return (base_weight * base_value + window_weight * window_value) / total_weight
+
+
 def loss_log_vars_for(model: torch.nn.Module, config: dict) -> torch.nn.ParameterDict | None:
     method = str(config["training"].get("mtl_method", "fixed")).lower()
     if method not in {"uncertainty", "uncertainty_weighting"}:
@@ -177,11 +216,24 @@ def loss_log_vars_for(model: torch.nn.Module, config: dict) -> torch.nn.Paramete
     return getattr(unwrap_model(model), "loss_log_vars")
 
 
+def gradnorm_log_weights_for(model: torch.nn.Module, config: dict) -> torch.nn.ParameterDict | None:
+    method = str(config["training"].get("mtl_method", "fixed")).lower()
+    if method != "gradnorm":
+        return None
+    return getattr(unwrap_model(model), "gradnorm_log_weights")
+
+
 def current_loss_weights(model: torch.nn.Module) -> dict[str, float]:
-    log_vars = getattr(unwrap_model(model), "loss_log_vars", None)
-    if log_vars is None:
-        return {}
-    return {f"{key}_loss_weight": float(torch.exp(-value.detach()).cpu()) for key, value in log_vars.items()}
+    unwrapped = unwrap_model(model)
+    weights = {}
+    log_vars = getattr(unwrapped, "loss_log_vars", None)
+    if log_vars is not None:
+        weights.update({f"uncertainty_{key}_loss_weight": float(torch.exp(-value.detach()).cpu()) for key, value in log_vars.items()})
+    gradnorm_log_weights = getattr(unwrapped, "gradnorm_log_weights", None)
+    if gradnorm_log_weights is not None:
+        gradnorm_weights = normalized_gradnorm_weights(gradnorm_log_weights)
+        weights.update({f"gradnorm_{key}_loss_weight": float(value.detach().cpu()) for key, value in gradnorm_weights.items()})
+    return weights
 
 
 def optimizer_parameter_groups(model: torch.nn.Module, weight_decay: float) -> list[dict]:
@@ -190,7 +242,7 @@ def optimizer_parameter_groups(model: torch.nn.Module, weight_decay: float) -> l
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        if name.startswith("loss_log_vars."):
+        if name.startswith("loss_log_vars.") or name.startswith("gradnorm_log_weights."):
             no_decay_params.append(parameter)
         else:
             decay_params.append(parameter)
@@ -198,6 +250,85 @@ def optimizer_parameter_groups(model: torch.nn.Module, weight_decay: float) -> l
     if no_decay_params:
         groups.append({"params": no_decay_params, "weight_decay": 0.0})
     return groups
+
+
+def shared_encoder_parameters(model: torch.nn.Module) -> list[torch.nn.Parameter]:
+    return [parameter for parameter in unwrap_model(model).encoder.parameters() if parameter.requires_grad]
+
+
+def detached_global_grad_norm(loss: torch.Tensor, parameters: list[torch.nn.Parameter]) -> torch.Tensor:
+    grads = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
+    terms = [grad.detach().pow(2).sum() for grad in grads if grad is not None]
+    if not terms:
+        return torch.zeros((), dtype=loss.dtype, device=loss.device)
+    return torch.sqrt(torch.stack(terms).sum() + 1e-12)
+
+
+def gradnorm_multitask_loss(
+    outputs: dict[str, torch.Tensor],
+    mask: torch.Tensor,
+    fraction: torch.Tensor,
+    model: torch.nn.Module,
+    config: dict,
+    base_pos_weight: float | None,
+    gradnorm_state: dict,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    train_cfg = config["training"]
+    components = loss_components(
+        outputs,
+        mask,
+        fraction,
+        lambda_window=train_cfg["lambda_window"],
+        lambda_dice=train_cfg["lambda_dice"],
+        base_pos_weight=base_pos_weight,
+    )
+    gradnorm_log_weights = gradnorm_log_weights_for(model, config)
+    if gradnorm_log_weights is None:
+        raise ValueError("GradNorm requested but model does not expose gradnorm_log_weights")
+    weights = normalized_gradnorm_weights(gradnorm_log_weights)
+    task_losses = torch.stack([components["base_task"], components["window_task"]])
+
+    if "initial_task_losses" not in gradnorm_state:
+        gradnorm_state["initial_task_losses"] = task_losses.detach().clamp_min(1e-8)
+    initial_losses = gradnorm_state["initial_task_losses"].to(device=task_losses.device, dtype=task_losses.dtype)
+
+    shared_params = shared_encoder_parameters(model)
+    base_grad_norm = detached_global_grad_norm(components["base_task"], shared_params)
+    window_grad_norm = detached_global_grad_norm(components["window_task"], shared_params)
+    raw_grad_norms = torch.stack([base_grad_norm, window_grad_norm])
+    weighted_grad_norms = torch.stack([weights["base"], weights["window"]]) * raw_grad_norms
+
+    loss_ratios = task_losses.detach().clamp_min(1e-8) / initial_losses
+    inverse_train_rates = loss_ratios / loss_ratios.mean().clamp_min(1e-8)
+    alpha = float(train_cfg.get("gradnorm_alpha", 1.5))
+    target_grad_norms = weighted_grad_norms.detach().mean() * inverse_train_rates.pow(alpha)
+    gradnorm_loss = torch.sum(torch.abs(weighted_grad_norms - target_grad_norms.detach()))
+
+    model_loss = (
+        weights["base"].detach() * components["base_task"]
+        + weights["window"].detach() * components["window_task"]
+        + float(train_cfg.get("lambda_consistency", 0.0)) * components["consistency"]
+    )
+    total = model_loss + float(train_cfg.get("gradnorm_lambda", 1.0)) * gradnorm_loss
+    parts = scalar_loss_parts(
+        total,
+        components,
+        float(train_cfg.get("lambda_consistency", 0.0)),
+        float(weights["base"].detach().cpu()),
+        float(weights["window"].detach().cpu()),
+        extra={
+            "gradnorm_loss": float(gradnorm_loss.detach().cpu()),
+            "gradnorm_base_grad_norm": float(weighted_grad_norms[0].detach().cpu()),
+            "gradnorm_window_grad_norm": float(weighted_grad_norms[1].detach().cpu()),
+            "gradnorm_base_raw_grad_norm": float(raw_grad_norms[0].detach().cpu()),
+            "gradnorm_window_raw_grad_norm": float(raw_grad_norms[1].detach().cpu()),
+            "gradnorm_base_target_grad_norm": float(target_grad_norms[0].detach().cpu()),
+            "gradnorm_window_target_grad_norm": float(target_grad_norms[1].detach().cpu()),
+            "gradnorm_base_inverse_rate": float(inverse_train_rates[0].detach().cpu()),
+            "gradnorm_window_inverse_rate": float(inverse_train_rates[1].detach().cpu()),
+        },
+    )
+    return total, parts
 
 
 def train_one_epoch(
@@ -208,11 +339,14 @@ def train_one_epoch(
     device: torch.device,
     config: dict,
     base_pos_weight: float | None,
+    gradnorm_state: dict | None = None,
 ) -> dict[str, float]:
     model.train()
     amp_enabled = bool(config["training"].get("amp", True)) and device.type == "cuda"
     totals: dict[str, float] = {}
     count = 0
+    gradnorm_state = gradnorm_state if gradnorm_state is not None else {}
+    mtl_method = str(config["training"].get("mtl_method", "fixed")).lower()
     for batch in tqdm(loader, desc="train", leave=False, ascii=True):
         x = batch["x"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
@@ -220,17 +354,28 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
             outputs = model(x)
-            loss, parts = multitask_loss(
-                outputs,
-                mask,
-                fraction,
-                lambda_window=config["training"]["lambda_window"],
-                lambda_dice=config["training"]["lambda_dice"],
-                lambda_consistency=config["training"].get("lambda_consistency", 0.0),
-                mtl_method=config["training"].get("mtl_method", "fixed"),
-                loss_log_vars=loss_log_vars_for(model, config),
-                base_pos_weight=base_pos_weight,
-            )
+            if mtl_method == "gradnorm":
+                loss, parts = gradnorm_multitask_loss(
+                    outputs,
+                    mask,
+                    fraction,
+                    model=model,
+                    config=config,
+                    base_pos_weight=base_pos_weight,
+                    gradnorm_state=gradnorm_state,
+                )
+            else:
+                loss, parts = multitask_loss(
+                    outputs,
+                    mask,
+                    fraction,
+                    lambda_window=config["training"]["lambda_window"],
+                    lambda_dice=config["training"]["lambda_dice"],
+                    lambda_consistency=config["training"].get("lambda_consistency", 0.0),
+                    mtl_method=config["training"].get("mtl_method", "fixed"),
+                    loss_log_vars=loss_log_vars_for(model, config),
+                    base_pos_weight=base_pos_weight,
+                )
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -276,6 +421,7 @@ def evaluate(
                 lambda_consistency=config["training"].get("lambda_consistency", 0.0),
                 mtl_method=config["training"].get("mtl_method", "fixed"),
                 loss_log_vars=loss_log_vars_for(model, config),
+                gradnorm_log_weights=gradnorm_log_weights_for(model, config),
                 base_pos_weight=base_pos_weight,
             )
         batch_size = x.shape[0]
@@ -414,24 +560,48 @@ def main(argv: list[str] | None = None) -> int:
     scaler = torch.amp.GradScaler(device.type, enabled=bool(config["training"].get("amp", True)) and device.type == "cuda")
 
 
-    model = maybe_compile_model(model, bool(config["training"].get("compile", True)))
+    compile_enabled = bool(config["training"].get("compile", True))
+    if str(config["training"].get("mtl_method", "fixed")).lower() == "gradnorm" and compile_enabled:
+        print("Warning: disabling torch.compile for GradNorm because it uses explicit autograd.grad calls.")
+        compile_enabled = False
+    model = maybe_compile_model(model, compile_enabled)
 
     metrics_rows: list[dict[str, float]] = []
     best_metric = -math.inf
     best_epoch = 0
+    best_row: dict[str, float] = {}
     best_threshold_value = 0.5
     patience = int(config["training"].get("early_stopping_patience", 5))
+    gradnorm_state: dict = {}
+    monitor_cfg = monitor_settings(config)
+    print(
+        "Monitor score: "
+        f"{monitor_cfg['base_weight']:.3g}*{monitor_cfg['base_metric']} + "
+        f"{monitor_cfg['window_weight']:.3g}*{monitor_cfg['window_metric']}"
+    )
     for epoch in range(1, int(config["training"]["epochs"]) + 1):
         print(f"Epoch {epoch}")
         epoch_lr = current_lr(optimizer)
-        train_metrics = train_one_epoch(model, train_loader, optimizer, scaler, device, config, base_pos_weight)
+        train_metrics = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            scaler,
+            device,
+            config,
+            base_pos_weight,
+            gradnorm_state=gradnorm_state,
+        )
         val_metrics, best_threshold_value, base_metrics = evaluate(model, val_loader, device, config, None, base_pos_weight)
         row = {"epoch": epoch, "lr": epoch_lr, "threshold": best_threshold_value, **train_metrics, **val_metrics}
         row.update({f"val_base_best_{k}": v for k, v in base_metrics.items()})
+        monitor_score = composite_monitor_score(row, config)
+        row["monitor_score"] = monitor_score
         metrics_rows.append(row)
         pd.DataFrame(metrics_rows).to_csv(run_dir / "metrics.csv", index=False)
         print(
             f"train_loss={train_metrics['train_loss']:.4f} "
+            f"monitor_score={monitor_score:.4f} "
             f"val_base_pr_auc={val_metrics['val_base_pr_auc']:.4f} "
             f"val_base_f1={base_metrics['f1']:.4f} threshold={best_threshold_value:.2f} "
             f"val_window_pr_auc={val_metrics['val_window_pr_auc']:.4f} "
@@ -440,14 +610,16 @@ def main(argv: list[str] | None = None) -> int:
             f"val_window_recall={val_metrics['val_window_recall']:.4f} "
             f"val_fraction_mae={val_metrics['val_fraction_mae']:.4f} "
             f"train_consistency={train_metrics.get('train_consistency', 0.0):.4f} "
+            f"gradnorm_loss={train_metrics.get('train_gradnorm_loss', 0.0):.4f} "
             f"base_w={train_metrics.get('train_base_loss_weight', 1.0):.3g} "
             f"window_w={train_metrics.get('train_window_loss_weight', 1.0):.3g} "
             f"lr={epoch_lr:.3g}"
         )
-        score = base_metrics["f1"]
+        score = monitor_score
         if score > best_metric:
             best_metric = score
             best_epoch = epoch
+            best_row = dict(row)
             torch.save(
                 {
                     "model_state": unwrap_model(model).state_dict(),
@@ -455,6 +627,8 @@ def main(argv: list[str] | None = None) -> int:
                     "threshold": best_threshold_value,
                     "base_pos_weight": base_pos_weight,
                     "epoch": epoch,
+                    "monitor_score": monitor_score,
+                    "monitor": monitor_cfg,
                 },
                 run_dir / "best_model.pt",
             )
@@ -462,7 +636,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Early stopping after epoch {epoch}; best epoch was {best_epoch}")
             break
         if scheduler is not None and scheduler_name == "reduce_on_plateau":
-            scheduler.step(base_metrics["f1"])
+            scheduler.step(monitor_score)
         elif scheduler is not None:
             scheduler.step()
 
@@ -476,8 +650,11 @@ def main(argv: list[str] | None = None) -> int:
         "train_windows": len(train_ds),
         "val_windows": len(val_ds),
         "best_epoch": best_epoch,
-        "best_val_base_f1": best_metric,
-        "base_threshold": best_threshold_value,
+        "best_monitor_score": best_metric,
+        "best_val_base_f1": best_row.get("val_base_best_f1"),
+        "best_val_window_pr_auc": best_row.get("val_window_pr_auc"),
+        "monitor": monitor_cfg,
+        "base_threshold": best_row.get("threshold", best_threshold_value),
         "base_pos_weight": base_pos_weight,
         "scheduler": scheduler_name,
         "final_lr": current_lr(optimizer),

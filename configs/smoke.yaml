@@ -39,6 +39,8 @@ training:
   lambda_window: 0.25
   lambda_dice: 0.20
   lambda_consistency: 0.10
+  gradnorm_alpha: 1.5
+  gradnorm_lambda: 1.0
   base_pos_weight: null
   estimate_pos_weight_batches: 256
   amp: true
@@ -48,27 +50,46 @@ training:
   persistent_workers: false
   prefetch_factor: 2
   metric_bins: 512
+  monitor:
+    base_metric: val_base_best_f1
+    window_metric: val_window_pr_auc
+    base_weight: 0.70
+    window_weight: 0.30
   threshold_grid: [0.20, 0.30, 0.40, 0.50, .60, 0.70, 0.80]
 
 dnabert2_baseline:
   enabled: false
   model_name: zhihan1996/DNABERT-2-117M
+  model_path: null
+  low_cpu_mem_usage: false
+  device_map: null
+  torch_dtype: null
+  load_strategy: auto
+  use_triton_flash_attention: false
   output_dir: runs/smoke/dnabert2_baseline
   model_max_length: 128
   pad_to_max_length: true
   label_fraction_threshold: 0.0
   epochs: 1
+  max_steps: -1
   batch_size: 2
   eval_batch_size: 4
   gradient_accumulation_steps: 1
   lr: 0.00003
+  lr_scheduler_type: linear
   weight_decay: 0.01
   warmup_steps: 5
+  warmup_ratio: null
   max_grad_norm: 1.0
+  eval_strategy: epoch
+  save_strategy: epoch
+  logging_strategy: steps
   eval_steps: 20
   save_steps: 20
   save_total_limit: 1
   logging_steps: 5
+  load_best_model_at_end: true
+  eval_on_start: false
   early_stopping_patience: 2
   metric_for_best_model: f1
   fp16: true

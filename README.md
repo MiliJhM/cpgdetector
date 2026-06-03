@@ -4,7 +4,7 @@ CpGDetector implements a PyTorch pipeline for CpG island detection on GRCh38.p14
 
 The model shares a dilated 1D convolution encoder, then uses task-specific adapters before each output head. The base head predicts one CpG island logit per base. The window head uses a 1x1 linear projection plus learned attention pooling over positions, instead of plain average pooling, so it can learn which bases in the window drive the window-level CpG island signal.
 
-Training uses multitask learning by default: a base-window consistency loss aligns the window probability with the mean base probability, and uncertainty weighting learns the relative weights of the base segmentation and window auxiliary tasks. Set `training.mtl_method: fixed` to recover static loss weighting.
+Training uses multitask learning by default: a base-window consistency loss aligns the window probability with the mean base probability, and uncertainty weighting learns the relative weights of the base segmentation and window auxiliary tasks. Set `training.mtl_method: fixed` to recover static loss weighting, or `training.mtl_method: gradnorm` to balance base/window tasks by their shared-encoder gradient norms.
 
 ## Environment
 
@@ -64,16 +64,29 @@ The DNABERT2 baseline adapts the fine-tuning setup from `WeitangSun/CpG_transfor
 python -m cpgdetector.dnabert2_baseline --config configs/default.yaml
 ```
 
+Use a locally downloaded HuggingFace model directory either through config:
+
+```yaml
+dnabert2_baseline:
+  model_path: models/DNABERT-2-117M
+```
+
+or through the command line:
+
+```powershell
+python -m cpgdetector.dnabert2_baseline --config configs/default.yaml --model-path models/DNABERT-2-117M
+```
+
 Configuration lives under `dnabert2_baseline` in `configs/default.yaml`. Notes on dataset differences and expected metric impact are in `docs/dnabert2_baseline_notes.md`.
 
 To include this baseline in the full evaluation pipeline:
 
 ```powershell
-.\scripts\run_full.ps1 -RunDNABERT2
+.\scripts\run_full.ps1 -RunDNABERT2 -DNABERT2ModelPath models/DNABERT-2-117M
 ```
 
 ```bash
-RUN_DNABERT2=1 bash scripts/run_full.sh
+RUN_DNABERT2=1 DNABERT2_MODEL_PATH=models/DNABERT-2-117M bash scripts/run_full.sh
 ```
 
 Alternatively, set `dnabert2_baseline.enabled: true` in the active config. The pipeline writes DNABERT2 metrics to `runs/<run>/dnabert2_baseline/dnabert2_metrics.json` and regenerates the main baseline comparison and ROC/PR plots with the DNABERT2 validation curve included.

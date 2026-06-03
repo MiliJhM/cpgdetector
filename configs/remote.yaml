@@ -8,7 +8,7 @@ data:
   val_chroms: ["chr17", "chr18"]
   test_chroms: ["chr19", "chr20", "chr21", "chr22"]
   window_size: 512
-  stride: 128
+  stride: 512
   max_train_windows: 1000000
   max_val_windows: 100000
   max_test_windows: 50000
@@ -19,24 +19,36 @@ data:
 
 
 dnabert2_baseline:
-  enabled: true
+  enabled: false
   model_name: zhihan1996/DNABERT-2-117M
-  output_dir: runs/remote/dnabert2_baseline
+  model_path: DNABERT2_models
+  low_cpu_mem_usage: false
+  device_map: null
+  torch_dtype: null
+  load_strategy: auto
+  use_triton_flash_attention: true
+  output_dir: runs/default/dnabert2_baseline
   model_max_length: 512
   pad_to_max_length: true
   label_fraction_threshold: 0.0
   epochs: 3
-  batch_size: 8
-  eval_batch_size: 16
+  max_steps: -1
+  batch_size: 256
+  eval_batch_size: 512
   gradient_accumulation_steps: 1
   lr: 0.00003
+  lr_scheduler_type: linear
   weight_decay: 0.01
   warmup_steps: 50
+  warmup_ratio: null
   max_grad_norm: 1.0
-  eval_steps: 500
-  save_steps: 500
+  eval_strategy: epoch
+  save_strategy: epoch
+  logging_strategy: steps
   save_total_limit: 3
   logging_steps: 100
+  load_best_model_at_end: true
+  eval_on_start: false
   early_stopping_patience: 3
   metric_for_best_model: f1
   fp16: true
@@ -46,7 +58,6 @@ dnabert2_baseline:
   max_train_windows: null
   max_val_windows: null
   max_test_windows: null
-
   
 prediction:
   batch_size: 2048

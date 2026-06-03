@@ -5,6 +5,7 @@ param(
     [string]$RunDir = "runs/default",
     [string[]]$PredChroms = @("chr19", "chr20", "chr21", "chr22"),
     [switch]$RunDNABERT2,
+    [string]$DNABERT2ModelPath = "",
     [switch]$Profile,
     [int]$ProfileBatches = 30
 )
@@ -37,6 +38,7 @@ Write-Log "Config: $Config"
 Write-Log "Run dir: $RunDir"
 Write-Log "Prediction chromosomes: $($PredChroms -join ', ')"
 Write-Log "Run DNABERT2 baseline switch: $RunDNABERT2"
+Write-Log "DNABERT2 local model path override: $DNABERT2ModelPath"
 
 if (-not (Get-Command conda -ErrorAction SilentlyContinue)) {
     throw "conda was not found on PATH"
@@ -109,12 +111,16 @@ Invoke-CondaPython $EvaluateArgs
 
 if ($ShouldRunDNABERT2) {
     $DNABERT2Dir = Join-Path $RunDir "dnabert2_baseline"
-    Write-Log "Training DNABERT2 window baseline"
-    Invoke-CondaPython @(
+    $DNABERT2Args = @(
         "-m", "cpgdetector.dnabert2_baseline",
         "--config", $Config,
         "--output-dir", $DNABERT2Dir
     )
+    if ($DNABERT2ModelPath) {
+        $DNABERT2Args += @("--model-path", $DNABERT2ModelPath)
+    }
+    Write-Log "Training DNABERT2 window baseline"
+    Invoke-CondaPython $DNABERT2Args
 }
 
 Write-Log "Regenerating baseline comparison plots"

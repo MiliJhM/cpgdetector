@@ -24,7 +24,7 @@ def plot_training_curves(metrics_csv: str | Path, output_path: str | Path) -> No
     axes[0].set_xlabel("Epoch")
     axes[0].set_ylabel("Loss")
     axes[0].legend()
-    for col in ["val_base_pr_auc", "val_base_f1", "val_window_pr_auc"]:
+    for col in ["monitor_score", "val_base_pr_auc", "val_base_f1", "val_window_pr_auc"]:
         if col in df:
             axes[1].plot(df["epoch"], df[col], marker="o", label=col)
     axes[1].set_xlabel("Epoch")

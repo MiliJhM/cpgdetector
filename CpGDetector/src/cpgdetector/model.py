@@ -93,6 +93,12 @@ class MultiTaskCpGNet(nn.Module):
                 "window": nn.Parameter(torch.zeros(())),
             }
         )
+        self.gradnorm_log_weights = nn.ParameterDict(
+            {
+                "base": nn.Parameter(torch.zeros(())),
+                "window": nn.Parameter(torch.zeros(())),
+            }
+        )
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         features = self.encoder(x)

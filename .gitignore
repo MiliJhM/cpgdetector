@@ -24,3 +24,12 @@ runs/
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Local HuggingFace model/checkpoint directories
+models/
+DNABERT2_models/
+model_cache/
+hf_models/
+hf_cache/
+checkpoints/
+pretrained/

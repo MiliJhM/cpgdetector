@@ -6,6 +6,7 @@ CONFIG="${CONFIG:-configs/default.yaml}"
 RUN_DIR="${RUN_DIR:-runs/default}"
 PRED_CHROMS="${PRED_CHROMS:-chr19 chr20 chr21 chr22}"
 RUN_DNABERT2="${RUN_DNABERT2:-0}"
+DNABERT2_MODEL_PATH="${DNABERT2_MODEL_PATH:-}"
 DO_PROFILE="${DO_PROFILE:-0}"
 PROFILE_BATCHES="${PROFILE_BATCHES:-30}"
 
@@ -30,6 +31,7 @@ log "Config: $CONFIG"
 log "Run dir: $RUN_DIR"
 log "Prediction chromosomes: $PRED_CHROMS"
 log "Run DNABERT2 baseline env flag: $RUN_DNABERT2"
+log "DNABERT2 local model path override: $DNABERT2_MODEL_PATH"
 
 if ! command -v conda >/dev/null 2>&1; then
   echo "conda was not found on PATH" >&2
@@ -85,7 +87,11 @@ run_py -m cpgdetector.evaluate --checkpoint "$CHECKPOINT" "${PRED_ARGS[@]}" --ou
 
 if [[ "$SHOULD_RUN_DNABERT2" == "1" ]]; then
   log "Training DNABERT2 window baseline"
-  run_py -m cpgdetector.dnabert2_baseline --config "$CONFIG" --output-dir "$RUN_DIR/dnabert2_baseline"
+  DNABERT2_ARGS=(-m cpgdetector.dnabert2_baseline --config "$CONFIG" --output-dir "$RUN_DIR/dnabert2_baseline")
+  if [[ -n "$DNABERT2_MODEL_PATH" ]]; then
+    DNABERT2_ARGS+=(--model-path "$DNABERT2_MODEL_PATH")
+  fi
+  run_py "${DNABERT2_ARGS[@]}"
 fi
 
 log "Regenerating baseline comparison plots"

@@ -59,8 +59,10 @@ The UCSC table uses 0-based half-open coordinates. Labels are generated as base-
 ## Validation Results
 
 - Best epoch: {int(summary.get("best_epoch", 0))}
+- Best monitor score: {summary.get("best_monitor_score", "NA")} using {summary.get("monitor", "NA")}
 - Base probability threshold selected on validation: {summary.get("base_threshold")}
 - Best base-level F1: {summary.get("best_val_base_f1")}
+- Best-window PR-AUC at selected checkpoint: {summary.get("best_val_window_pr_auc", "NA")}
 - Base-level PR-AUC at best row: {best.get("val_base_pr_auc", "NA")}
 - Window-level PR-AUC at best row: {best.get("val_window_pr_auc", "NA")}
 

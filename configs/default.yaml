@@ -25,20 +25,22 @@ model:
   window_hidden_channels: 256
 
 training:
-  epochs: 50
-  batch_size: 2048
+  epochs: 100
+  batch_size: 4096
   compile: True
-  lr: 0.001
+  lr: 0.0005
   min_lr: 0.00002
-  scheduler: warmup_cosine
+  scheduler: reduce_on_plateau
   warmup_epochs: 3
   plateau_factor: 0.5
   plateau_patience: 3
   weight_decay: 0.01
-  mtl_method: uncertainty
+  mtl_method: gradnorm
   lambda_window: 0.40
   lambda_dice: 0.20
   lambda_consistency: 0.10
+  gradnorm_alpha: 1.5
+  gradnorm_lambda: 1.0
   base_pos_weight: null
   estimate_pos_weight_batches: 2048
   amp: true
@@ -48,27 +50,44 @@ training:
   persistent_workers: true
   prefetch_factor: 4
   metric_bins: 2048
+  monitor:
+    base_metric: val_base_best_f1
+    window_metric: val_window_pr_auc
+    base_weight: 0.70
+    window_weight: 0.30
   threshold_grid: [0.20, 0.25, 0.30, .35, .40, 0.45, 0.60, 0.70, 0.80]
 
 dnabert2_baseline:
   enabled: false
   model_name: zhihan1996/DNABERT-2-117M
+  model_path: DNABERT2_models
+  low_cpu_mem_usage: false
+  device_map: null
+  torch_dtype: null
+  load_strategy: auto
+  use_triton_flash_attention: true
   output_dir: runs/default/dnabert2_baseline
   model_max_length: 512
   pad_to_max_length: true
   label_fraction_threshold: 0.0
   epochs: 3
-  batch_size: 8
-  eval_batch_size: 16
+  max_steps: -1
+  batch_size: 256
+  eval_batch_size: 512
   gradient_accumulation_steps: 1
   lr: 0.00003
+  lr_scheduler_type: linear
   weight_decay: 0.01
   warmup_steps: 50
+  warmup_ratio: null
   max_grad_norm: 1.0
-  eval_steps: 500
-  save_steps: 500
+  eval_strategy: epoch
+  save_strategy: epoch
+  logging_strategy: steps
   save_total_limit: 3
   logging_steps: 100
+  load_best_model_at_end: true
+  eval_on_start: false
   early_stopping_patience: 3
   metric_for_best_model: f1
   fp16: true
