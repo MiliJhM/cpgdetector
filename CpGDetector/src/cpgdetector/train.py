@@ -116,6 +116,44 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
 def maybe_compile_model(model: torch.nn.Module, enabled: bool) -> torch.nn.Module:
     if not enabled:
         return model
+
+
+def build_scheduler(optimizer: torch.optim.Optimizer, config: dict):
+    train_cfg = config["training"]
+    name = str(train_cfg.get("scheduler", "none")).lower()
+    if name in {"none", "off", "false"}:
+        return None, "none"
+    if name == "reduce_on_plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=float(train_cfg.get("plateau_factor", 0.5)),
+            patience=int(train_cfg.get("plateau_patience", 3)),
+            min_lr=float(train_cfg.get("min_lr", 0.0)),
+        )
+        return scheduler, name
+    if name == "warmup_cosine":
+        epochs = int(train_cfg["epochs"])
+        warmup_epochs = max(0, int(train_cfg.get("warmup_epochs", 0)))
+        min_lr = float(train_cfg.get("min_lr", 0.0))
+        base_lr = float(train_cfg["lr"])
+        min_factor = min_lr / base_lr if base_lr > 0 else 0.0
+
+        def lr_lambda(epoch_idx: int) -> float:
+            epoch_num = epoch_idx + 1
+            if warmup_epochs > 0 and epoch_num <= warmup_epochs:
+                return max(epoch_num / warmup_epochs, min_factor)
+            decay_epochs = max(1, epochs - warmup_epochs)
+            progress = min(1.0, max(0.0, (epoch_num - warmup_epochs) / decay_epochs))
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return min_factor + (1.0 - min_factor) * cosine
+
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda), name
+    raise ValueError(f"Unknown scheduler: {name}")
+
+
+def current_lr(optimizer: torch.optim.Optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
     try:
         return torch.compile(model)
     except Exception as exc:
@@ -314,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     val_loader = dataloader(val_ds, config, shuffle=False)
     model = MultiTaskCpGNet(**config["model"]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["training"]["lr"]), weight_decay=float(config["training"]["weight_decay"]))
+    scheduler, scheduler_name = build_scheduler(optimizer, config)
     scaler = torch.amp.GradScaler(device.type, enabled=bool(config["training"].get("amp", True)) and device.type == "cuda")
 
 
@@ -326,16 +365,18 @@ def main(argv: list[str] | None = None) -> int:
     patience = int(config["training"].get("early_stopping_patience", 5))
     for epoch in range(1, int(config["training"]["epochs"]) + 1):
         print(f"Epoch {epoch}")
+        epoch_lr = current_lr(optimizer)
         train_metrics = train_one_epoch(model, train_loader, optimizer, scaler, device, config, base_pos_weight)
         val_metrics, best_threshold_value, base_metrics = evaluate(model, val_loader, device, config, None, base_pos_weight)
-        row = {"epoch": epoch, "threshold": best_threshold_value, **train_metrics, **val_metrics}
+        row = {"epoch": epoch, "lr": epoch_lr, "threshold": best_threshold_value, **train_metrics, **val_metrics}
         row.update({f"val_base_best_{k}": v for k, v in base_metrics.items()})
         metrics_rows.append(row)
         pd.DataFrame(metrics_rows).to_csv(run_dir / "metrics.csv", index=False)
         print(
             f"train_loss={train_metrics['train_loss']:.4f} "
             f"val_base_pr_auc={val_metrics['val_base_pr_auc']:.4f} "
-            f"val_base_f1={base_metrics['f1']:.4f} threshold={best_threshold_value:.2f}"
+            f"val_base_f1={base_metrics['f1']:.4f} threshold={best_threshold_value:.2f} "
+            f"lr={epoch_lr:.3g}"
         )
         score = base_metrics["f1"]
         if score > best_metric:
@@ -354,6 +395,10 @@ def main(argv: list[str] | None = None) -> int:
         elif epoch - best_epoch >= patience:
             print(f"Early stopping after epoch {epoch}; best epoch was {best_epoch}")
             break
+        if scheduler is not None and scheduler_name == "reduce_on_plateau":
+            scheduler.step(base_metrics["f1"])
+        elif scheduler is not None:
+            scheduler.step()
 
     plot_training_curves(run_dir / "metrics.csv", run_dir / "training_curves.png")
     baseline_metrics = evaluate_traditional_baseline(val_ds, threshold=0.5, max_items=min(5000, len(val_ds)))
@@ -368,6 +413,8 @@ def main(argv: list[str] | None = None) -> int:
         "best_val_base_f1": best_metric,
         "base_threshold": best_threshold_value,
         "base_pos_weight": base_pos_weight,
+        "scheduler": scheduler_name,
+        "final_lr": current_lr(optimizer),
         "traditional_baseline_window": baseline_metrics,
         "logistic_baseline_window": logistic_metrics,
     }

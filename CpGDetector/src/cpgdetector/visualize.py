@@ -17,7 +17,7 @@ def plot_training_curves(metrics_csv: str | Path, output_path: str | Path) -> No
     df = pd.read_csv(metrics_csv)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    fig, axes = plt.subplots(1, 3 if "lr" in df else 2, figsize=(15 if "lr" in df else 11, 4))
     axes[0].plot(df["epoch"], df["train_loss"], marker="o", label="train loss")
     if "val_loss" in df:
         axes[0].plot(df["epoch"], df["val_loss"], marker="o", label="val loss")
@@ -31,6 +31,12 @@ def plot_training_curves(metrics_csv: str | Path, output_path: str | Path) -> No
     axes[1].set_ylabel("Metric")
     axes[1].set_ylim(0, 1)
     axes[1].legend()
+    if "lr" in df:
+        axes[2].plot(df["epoch"], df["lr"], marker="o", color="tab:purple", label="learning rate")
+        axes[2].set_xlabel("Epoch")
+        axes[2].set_ylabel("Learning Rate")
+        axes[2].set_yscale("log")
+        axes[2].legend()
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)

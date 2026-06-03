@@ -29,6 +29,11 @@ training:
   batch_size: 64
   compile: false
   lr: 0.001
+  min_lr: 0.00002
+  scheduler: warmup_cosine
+  warmup_epochs: 1
+  plateau_factor: 0.5
+  plateau_patience: 2
   weight_decay: 0.01
   lambda_window: 0.25
   lambda_dice: 0.20

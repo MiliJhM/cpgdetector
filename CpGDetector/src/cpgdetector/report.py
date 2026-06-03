@@ -47,6 +47,7 @@ The UCSC table uses 0-based half-open coordinates. Labels are generated as base-
 - Base segmentation head: `Conv1d(..., 1, kernel_size=1)` producing one logit per base.
 - Window auxiliary head: task-specific 1x1 linear projection, learned attention pooling over sequence positions, and an MLP output.
 - Loss: base BCE + Dice loss + weighted window BCE.
+- Learning-rate scheduler: {summary.get("scheduler", "NA")}; final LR: {summary.get("final_lr", "NA")}.
 - CUDA AMP is enabled when a CUDA device is available.
 
 ## Validation Results
